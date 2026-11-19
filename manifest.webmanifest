@@ -1,0 +1,12 @@
+{
+  "name": "Commandes · L'Atelier des Rêves",
+  "short_name": "Commandes",
+  "start_url": "./index.html#/jour",
+  "display": "standalone",
+  "background_color": "#FFFFFF",
+  "theme_color": "#FFFFFF",
+  "icons": [
+    { "src": "assets/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "assets/logo.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

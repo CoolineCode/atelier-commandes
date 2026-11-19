@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Commandes · L'Atelier des Rêves</title>
+  <meta name="theme-color" content="#FFFFFF">
+  <link rel="icon" type="image/png" href="assets/icon-192.png">
+  <link rel="apple-touch-icon" href="assets/icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#view">Aller au contenu</a>
+
+  <div class="app" id="app" hidden>
+    <aside class="rail" aria-label="Navigation principale">
+      <a class="rail-logo" href="#/jour" aria-label="Accueil">
+        <img src="assets/logo.png" alt="L'Atelier des Rêves, pâtisserie artisanale d'Ophélie" width="132" height="132">
+      </a>
+      <nav class="rail-nav" id="rail-nav"></nav>
+      <div class="rail-foot" id="rail-foot"></div>
+    </aside>
+
+    <header class="topbar">
+      <a class="topbar-logo" href="#/jour" aria-label="Accueil">
+        <img src="assets/logo.png" alt="" width="44" height="44">
+      </a>
+      <span class="topbar-title" id="topbar-title">Commandes</span>
+      <a class="icon-btn" href="#/reglages" aria-label="Réglages" id="topbar-settings"></a>
+    </header>
+
+    <main class="main" id="view" tabindex="-1"></main>
+
+    <nav class="tabbar" id="tabbar" aria-label="Navigation"></nav>
+  </div>
+
+  <div class="login" id="login" hidden></div>
+  <div class="boot" id="boot"><img src="assets/logo.png" alt="" width="96" height="96"></div>
+
+  <div class="modal-backdrop" id="modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" id="modal-box"></div>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="config.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
