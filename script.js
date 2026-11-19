@@ -329,6 +329,16 @@
       const { error } = await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: false, emailRedirectTo: location.origin + location.pathname } });
       if (error) throw error;
     },
+    async signInPassword(email, password) {
+      const sb = await this.client();
+      const { error } = await sb.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+    },
+    async changePassword(password) {
+      const sb = await this.client();
+      const { error } = await sb.auth.updateUser({ password });
+      if (error) throw error;
+    },
     async fetchAll(table, order) {
       const sb = await this.client(); const out = []; let from = 0;
       for (;;) {
@@ -1443,6 +1453,18 @@
         <button class="btn" id="add-ms">${icon('plus')}Ajouter un temps fort</button>
       </section>
 
+      ${isOnline ? `
+      <section class="settings-section">
+        <h2 class="section-title">Mot de passe</h2>
+        <p>Choisis un mot de passe d'au moins 10 caractères. Le navigateur de la tablette pourra le retenir.</p>
+        <form id="pass-form" class="grid-2" style="align-items:end" novalidate>
+          <input type="email" autocomplete="username" value="${esc(S.user && S.user.email)}" hidden>
+          <label class="field"><span>Nouveau mot de passe</span><input type="password" id="new-pass" autocomplete="new-password" minlength="10"></label>
+          <label class="field"><span>Confirmer</span><input type="password" id="new-pass2" autocomplete="new-password" minlength="10"></label>
+          <div><button class="btn btn-dark" type="submit">Changer le mot de passe</button></div>
+        </form>
+      </section>` : ''}
+
       <section class="settings-section">
         <h2 class="section-title">Données</h2>
         <p>${isOnline ? `Données enregistrées en ligne. Connectée avec <strong>${esc(S.user && S.user.email)}</strong>.` : 'Mode démo : les données sont enregistrées uniquement dans ce navigateur. Elles disparaissent si l’historique du navigateur est vidé.'}</p>
@@ -1493,6 +1515,14 @@
     };
     if (isOnline) {
       $('#logout').onclick = async () => { await store.signOut(); location.hash = ''; location.reload(); };
+      $('#pass-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const p1 = $('#new-pass').value; const p2 = $('#new-pass2').value;
+        if (p1.length < 10) { toast('Le mot de passe doit faire au moins 10 caractères'); $('#new-pass').focus(); return; }
+        if (p1 !== p2) { toast('Les deux mots de passe ne correspondent pas'); $('#new-pass2').focus(); return; }
+        try { await store.changePassword(p1); $('#new-pass').value = ''; $('#new-pass2').value = ''; toast('Mot de passe changé'); }
+        catch (err) { toast(authError(err)); }
+      };
     } else {
       $('#reset-demo').onclick = async () => {
         if (!(await confirmDialog('Remettre les données d’exemple ?', 'Toutes les commandes et réglages saisis dans la démo seront remplacés.', 'Remettre les données', true))) return;
@@ -1552,24 +1582,77 @@
   /* ------------------------------------------------------------------
      Connexion (mode en ligne) et démarrage
      ------------------------------------------------------------------ */
-  function showLogin(message) {
+  // Traduction des messages d'erreur courants de Supabase Auth
+  function authError(err) {
+    const m = String((err && err.message) || '').toLowerCase();
+    if (m.includes('invalid login credentials')) return 'Email ou mot de passe incorrect.';
+    if (m.includes('rate limit') || m.includes('only request this')) return 'Trop de demandes. Patiente quelques minutes (les emails sont limités à 2 par heure) ou connecte-toi avec ton mot de passe.';
+    if (m.includes('email not confirmed')) return 'Ce compte n’est pas encore confirmé dans Supabase.';
+    if (m.includes('signups not allowed') || m.includes('user not found')) return 'Cette adresse n’a pas de compte.';
+    if (m.includes('should be different')) return 'Le nouveau mot de passe doit être différent de l’ancien.';
+    if (m.includes('password')) return 'Mot de passe refusé : ' + err.message;
+    return (err && err.message) || 'Erreur inconnue.';
+  }
+
+  function showLogin(message, mode) {
     $('#boot').hidden = true; $('#app').hidden = true;
     const box = $('#login'); box.hidden = false;
+    const withPassword = mode !== 'lien';
     box.innerHTML = `
-      <form class="login-card" id="login-form">
+      <form class="login-card" id="login-form" novalidate>
         <img src="${esc(LOGO_SRC)}" alt="L'Atelier des Rêves">
         <h1>Commandes</h1>
-        <p>${message ? esc(message) : 'Indique ton adresse email : tu recevras un lien pour te connecter, sans mot de passe.'}</p>
-        <label class="field" style="text-align:left"><span>Email</span><input type="email" id="login-email" autocomplete="email" required></label>
+        <p>${message ? esc(message) : (withPassword ? 'Connecte-toi avec ton email et ton mot de passe.' : 'Indique ton adresse email : tu recevras un lien pour te connecter.')}</p>
+        <div class="segmented" role="group" aria-label="Mode de connexion" style="justify-self:center">
+          <button type="button" data-mode="mdp" aria-pressed="${withPassword}">Mot de passe</button>
+          <button type="button" data-mode="lien" aria-pressed="${!withPassword}">Lien par email</button>
+        </div>
+        <label class="field" style="text-align:left"><span>Email</span><input type="email" id="login-email" name="email" autocomplete="username" required></label>
+        ${withPassword ? `
+        <label class="field" style="text-align:left"><span>Mot de passe</span>
+          <span style="position:relative;display:block">
+            <input type="password" id="login-pass" name="password" autocomplete="current-password" required style="padding-right:100px">
+            <button type="button" class="btn btn-sm btn-ghost pass-toggle" id="toggle-pass" aria-label="Afficher le mot de passe">Afficher</button>
+          </span>
+        </label>
+        <button class="btn btn-dark" type="submit">Se connecter</button>` : `
         <button class="btn btn-dark" type="submit">Recevoir le lien de connexion</button>
-        <p class="small" id="login-msg" role="status"></p>
+        <p class="small muted" style="margin:0">Ouvre le lien dans ce même navigateur, sur cet appareil.</p>`}
+        <p class="small" id="login-msg" role="status" style="min-height:1.4em"></p>
       </form>`;
+    $$('[data-mode]', box).forEach((b) => b.onclick = () => {
+      const email = $('#login-email').value;
+      showLogin('', b.dataset.mode);
+      $('#login-email').value = email;
+    });
+    const toggle = $('#toggle-pass');
+    if (toggle) toggle.onclick = () => {
+      const inp = $('#login-pass'); const show = inp.type === 'password';
+      inp.type = show ? 'text' : 'password'; toggle.textContent = show ? 'Masquer' : 'Afficher';
+    };
+    let busy = false;
     $('#login-form').onsubmit = async (e) => {
       e.preventDefault();
-      const email = $('#login-email').value.trim(); if (!email) return;
-      $('#login-msg').textContent = 'Envoi en cours…';
-      try { await store.sendLink(email); $('#login-msg').textContent = 'Lien envoyé. Ouvre l’email sur cet appareil pour te connecter.'; }
-      catch (err) { $('#login-msg').textContent = 'Envoi impossible : ' + (err.message || 'vérifie l’adresse'); }
+      if (busy) return;
+      const email = $('#login-email').value.trim().toLowerCase();
+      const msg = $('#login-msg');
+      if (!email) { msg.textContent = 'Indique ton adresse email.'; $('#login-email').focus(); return; }
+      busy = true;
+      try {
+        if (withPassword) {
+          const pass = $('#login-pass').value;
+          if (!pass) { msg.textContent = 'Indique ton mot de passe.'; $('#login-pass').focus(); return; }
+          msg.textContent = 'Connexion en cours…';
+          await store.signInPassword(email, pass);
+          location.reload();
+        } else {
+          msg.textContent = 'Envoi en cours…';
+          await store.sendLink(email);
+          msg.textContent = 'Lien envoyé. Ouvre l’email sur cet appareil, dans ce navigateur.';
+        }
+      } catch (err) {
+        msg.textContent = authError(err);
+      } finally { busy = false; }
     };
     $('#login-email').focus();
   }

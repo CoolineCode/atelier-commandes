@@ -240,6 +240,13 @@ begin
   end loop;
 end $$;
 
+-- Droits de base pour l'utilisateur connecté (les règles RLS ci-dessus
+-- filtrent ensuite : seules les adresses de app_admins voient les données).
+grant usage on schema public to authenticated;
+grant select, insert, update, delete on public.products, public.customers, public.orders,
+      public.order_items, public.milestones, public.settings to authenticated;
+grant execute on function public.is_admin() to authenticated;
+
 -- Les visiteurs non connectés (rôle anon) n'ont accès à rien.
 revoke all on public.products, public.customers, public.orders, public.order_items,
               public.milestones, public.settings, public.app_admins from anon;
