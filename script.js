@@ -107,13 +107,13 @@
     max_commandes_creneau: 4,
     capacite_jour: 25,
     horaires: {
-      0: { ouvert: true, debut: '08:00', fin: '13:00' },
-      1: { ouvert: false, debut: '08:00', fin: '19:00' },
-      2: { ouvert: true, debut: '08:00', fin: '19:00' },
-      3: { ouvert: true, debut: '08:00', fin: '19:00' },
-      4: { ouvert: true, debut: '08:00', fin: '19:00' },
-      5: { ouvert: true, debut: '08:00', fin: '19:00' },
-      6: { ouvert: true, debut: '08:00', fin: '19:00' }
+      0: { ouvert: true, debut: '08:00', fin: '13:00', pause_debut: '', pause_fin: '' },
+      1: { ouvert: false, debut: '08:00', fin: '19:00', pause_debut: '', pause_fin: '' },
+      2: { ouvert: true, debut: '08:00', fin: '19:00', pause_debut: '', pause_fin: '' },
+      3: { ouvert: true, debut: '08:00', fin: '19:00', pause_debut: '', pause_fin: '' },
+      4: { ouvert: true, debut: '08:00', fin: '19:00', pause_debut: '', pause_fin: '' },
+      5: { ouvert: true, debut: '08:00', fin: '19:00', pause_debut: '', pause_fin: '' },
+      6: { ouvert: true, debut: '08:00', fin: '19:00', pause_debut: '', pause_fin: '' }
     },
     fermetures: []
   };
@@ -454,8 +454,14 @@
     const h = hoursFor(d);
     if (!h.ouvert || !h.debut || !h.fin) return [];
     const step = Math.max(5, Number(S.settings.creneau_minutes) || 30);
+    const hasPause = h.pause_debut && h.pause_fin;
+    const pd = hasPause ? timeToMin(h.pause_debut) : null;
+    const pf = hasPause ? timeToMin(h.pause_fin) : null;
     const out = [];
-    for (let m = timeToMin(h.debut); m < timeToMin(h.fin); m += step) out.push(minToTime(m));
+    for (let m = timeToMin(h.debut); m < timeToMin(h.fin); m += step) {
+      if (hasPause && m < pf && m + step > pd) continue; // créneau pendant la coupure du midi
+      out.push(minToTime(m));
+    }
     return out;
   }
 
@@ -1748,14 +1754,21 @@
 
       <section class="settings-section">
         <h2 class="section-title">Horaires de retrait</h2>
-        <p>Les créneaux proposés dans une commande sont calculés à partir de ces horaires.</p>
-        <div class="hours">${dayOrder.map((i) => `
-          <div class="hour-row ${s.horaires[i].ouvert ? '' : 'off'}" data-day="${i}">
-            <strong>${JOURS[i]}</strong>
-            <label class="check"><input type="checkbox" data-h="ouvert" ${s.horaires[i].ouvert ? 'checked' : ''}>Ouvert</label>
-            <label class="field"><span class="sr">Début ${JOURS[i]}</span><input type="time" data-h="debut" value="${esc(s.horaires[i].debut)}"></label>
-            <label class="field"><span class="sr">Fin ${JOURS[i]}</span><input type="time" data-h="fin" value="${esc(s.horaires[i].fin)}"></label>
-          </div>`).join('')}</div>
+        <p>Les créneaux proposés dans une commande sont calculés à partir de ces horaires. Coche « Coupure » pour fermer le midi : aucun créneau ne sera proposé pendant ce temps.</p>
+        <div class="hours">${dayOrder.map((i) => {
+          const h = s.horaires[i];
+          return `
+          <div class="hour-row ${h.ouvert ? '' : 'off'} ${h.pause_debut ? 'has-pause' : ''}" data-day="${i}">
+            <strong class="hr-day">${JOURS[i]}</strong>
+            <label class="check hr-open"><input type="checkbox" data-h="ouvert" ${h.ouvert ? 'checked' : ''}>Ouvert</label>
+            <label class="field hr-t"><span class="hr-lab">Ouverture</span><input type="time" data-h="debut" value="${esc(h.debut)}"></label>
+            <label class="field hr-t"><span class="hr-lab">Fermeture</span><input type="time" data-h="fin" value="${esc(h.fin)}"></label>
+            <label class="check hr-cut"><input type="checkbox" data-h="coupure" ${h.pause_debut ? 'checked' : ''}>Coupure</label>
+            <label class="field hr-t hr-p"><span class="hr-lab">Fermé à</span><input type="time" data-h="pause_debut" value="${esc(h.pause_debut || '')}"></label>
+            <label class="field hr-t hr-p"><span class="hr-lab">Réouverture</span><input type="time" data-h="pause_fin" value="${esc(h.pause_fin || '')}"></label>
+          </div>`;
+        }).join('')}</div>
+        <button class="btn btn-sm" id="same-pause" style="margin-top:12px">Même coupure pour tous les jours ouverts</button>
       </section>
 
       <section class="settings-section">
@@ -1815,20 +1828,51 @@
         </div>
       </section>`;
 
+    const setPause = (row, i, pd, pf) => {
+      s.horaires[i].pause_debut = pd; s.horaires[i].pause_fin = pf;
+      row.querySelector('[data-h="pause_debut"]').value = pd;
+      row.querySelector('[data-h="pause_fin"]').value = pf;
+      row.querySelector('[data-h="coupure"]').checked = !!pd;
+      row.classList.toggle('has-pause', !!pd);
+    };
     $$('.hour-row').forEach((row) => {
       const i = Number(row.dataset.day);
       row.querySelectorAll('[data-h]').forEach((inp) => inp.onchange = () => {
-        const k = inp.dataset.h; s.horaires[i][k] = k === 'ouvert' ? inp.checked : inp.value;
+        const k = inp.dataset.h;
+        if (k === 'coupure') {
+          if (inp.checked) setPause(row, i, s.horaires[i].pause_debut || '12:30', s.horaires[i].pause_fin || '14:00');
+          else setPause(row, i, '', '');
+          return;
+        }
+        s.horaires[i][k] = k === 'ouvert' ? inp.checked : inp.value;
         row.classList.toggle('off', !s.horaires[i].ouvert);
       });
     });
+    $('#same-pause').onclick = () => {
+      const ref = dayOrder.map((i) => s.horaires[i]).find((h) => h.ouvert && h.pause_debut && h.pause_fin);
+      if (!ref) { toast('Coche d’abord « Coupure » sur un jour ouvert et règle ses heures'); return; }
+      let n = 0;
+      $$('.hour-row').forEach((row) => {
+        const i = Number(row.dataset.day);
+        if (!s.horaires[i].ouvert) return;
+        // on n'ajoute pas de coupure à un jour qui ferme avant la reprise (ex. dimanche matin)
+        if (timeToMin(s.horaires[i].fin) <= timeToMin(ref.pause_fin)) return;
+        setPause(row, i, ref.pause_debut, ref.pause_fin); n++;
+      });
+      toast(`Coupure ${fmtTime(ref.pause_debut)} à ${fmtTime(ref.pause_fin)} appliquée à ${n} jour${n > 1 ? 's' : ''}. Pense à enregistrer.`);
+    };
     $('#s-step').onchange = (e) => { s.creneau_minutes = Number(e.target.value); };
     $('#s-maxslot').oninput = (e) => { s.max_commandes_creneau = Math.max(1, Math.round(num(e.target.value, 1))); };
     $('#s-capa').oninput = (e) => { s.capacite_jour = Math.max(1, Math.round(num(e.target.value, 1))); };
     const persist = async (msg) => {
       for (const i of Object.keys(s.horaires)) {
         const h = s.horaires[i];
-        if (h.ouvert && timeToMin(h.fin) <= timeToMin(h.debut)) { toast(`${JOURS[i]} : l’heure de fin doit être après l’heure de début`); return false; }
+        if (h.ouvert && timeToMin(h.fin) <= timeToMin(h.debut)) { toast(`${JOURS[i]} : l’heure de fermeture doit être après l’heure d’ouverture`); return false; }
+        if (h.ouvert && (h.pause_debut || h.pause_fin)) {
+          if (!h.pause_debut || !h.pause_fin) { toast(`${JOURS[i]} : indique le début et la fin de la coupure`); return false; }
+          const a = timeToMin(h.debut), b = timeToMin(h.pause_debut), c = timeToMin(h.pause_fin), d = timeToMin(h.fin);
+          if (!(a < b && b < c && c < d)) { toast(`${JOURS[i]} : la coupure doit être entre l’ouverture et la fermeture, et finir après avoir commencé`); return false; }
+        }
       }
       const saved = await guard(() => store.saveSettings(s), 'Réglages non enregistrés');
       if (saved === undefined) return false;
