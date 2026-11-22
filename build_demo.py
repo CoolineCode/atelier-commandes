@@ -16,6 +16,7 @@ logo = "data:image/webp;base64," + base64.b64encode(buf.getvalue()).decode()
 config = "window.APP_CONFIG = { MODE: 'demo', NOM_BOUTIQUE: \"L'Atelier des Rêves\" };"
 assert "</script" not in js.lower()
 
+html = re.sub(r'(style\.css|config\.js|script\.js)\?v=[^"]*', r'\1', html)
 html = html.replace('<link rel="stylesheet" href="style.css">', "<style>\n" + css + "\n</style>")
 html = re.sub(r'\s*<link rel="manifest"[^>]*>', "", html)
 html = html.replace("assets/logo.png", logo).replace("assets/icon-192.png", logo)

@@ -7,6 +7,13 @@
 (function () {
   'use strict';
 
+  // =====================================================================
+  //  VERSION DE L'APPLI
+  //  À changer à chaque publication, en même temps que version.json et
+  //  les « ?v=... » de index.html (VS Code : Ctrl+Shift+H, remplacer partout).
+  // =====================================================================
+  const APP_VERSION = '2026-11-22.1';
+
   const CFG = Object.assign({ MODE: 'demo', SUPABASE_URL: '', SUPABASE_ANON_KEY: '', NOM_BOUTIQUE: "L'Atelier des Rêves" }, window.APP_CONFIG || {});
   const logoImg = document.querySelector('.rail-logo img');
   const LOGO_SRC = logoImg ? logoImg.getAttribute('src') : 'assets/logo.png';
@@ -1819,6 +1826,7 @@
 
       <section class="settings-section">
         <h2 class="section-title">Données</h2>
+        <p class="small muted" style="margin-top:-6px">Version de l'appli : ${esc(APP_VERSION)}</p>
         <p>${isOnline ? `Données enregistrées en ligne. Connectée avec <strong>${esc(S.user && S.user.email)}</strong>.` : 'Mode démo : les données sont enregistrées uniquement dans ce navigateur. Elles disparaissent si l’historique du navigateur est vidé.'}</p>
         <div class="page-actions">
           <button class="btn" id="backup">${icon('download')}Télécharger une sauvegarde</button>
@@ -2048,6 +2056,45 @@
     S.products.forEach((p) => { p.tva = Number(p.tva); if (p.prix_ttc != null) p.prix_ttc = Number(p.prix_ttc); if (p.prix_ht_pro != null) p.prix_ht_pro = Number(p.prix_ht_pro); });
   }
 
+  /* ------------------------------------------------------------------
+     Détection d'une nouvelle version publiée
+     L'appli reste souvent ouverte toute la journée sur la tablette :
+     elle compare régulièrement son numéro à celui de version.json en ligne
+     et propose de se mettre à jour (jamais de rechargement imposé).
+     ------------------------------------------------------------------ */
+  let updateShown = false;
+  async function checkForUpdate() {
+    if (updateShown || document.hidden) return;
+    try {
+      const res = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.version && data.version !== APP_VERSION) showUpdateBanner(data.version);
+    } catch (e) { /* hors ligne ou fichier absent : on réessaiera plus tard */ }
+  }
+  function showUpdateBanner(newVersion) {
+    updateShown = true;
+    const bar = document.createElement('div');
+    bar.className = 'update-banner';
+    bar.setAttribute('role', 'status');
+    bar.innerHTML = `<span>Nouvelle version disponible</span><button type="button" class="btn btn-sm btn-primary">Mettre à jour</button>`;
+    bar.querySelector('button').onclick = async () => {
+      if (leaveGuard && !leaveGuard()) {
+        const ok = await confirmDialog('Mettre à jour maintenant ?', 'La commande en cours n’est pas enregistrée. Enregistre-la d’abord, ou accepte de perdre ce qui a été saisi.', 'Mettre à jour quand même', true);
+        if (!ok) return;
+      }
+      const url = location.pathname + '?maj=' + encodeURIComponent(newVersion) + location.hash;
+      location.replace(url);
+    };
+    document.body.appendChild(bar);
+  }
+  function startUpdateWatch() {
+    if (location.search.includes('maj=')) history.replaceState(null, '', location.pathname + location.hash);
+    setTimeout(checkForUpdate, 5000);
+    setInterval(checkForUpdate, 10 * 60 * 1000);           // toutes les 10 minutes
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); }); // au réveil de la tablette
+  }
+
   async function start() {
     try {
       const { user } = await store.init();
@@ -2064,6 +2111,7 @@
     $('#boot').hidden = true; $('#login').hidden = true; $('#app').hidden = false;
     if (!location.hash) history.replaceState(null, '', '#/jour');
     router();
+    startUpdateWatch();
   }
   start();
 })();

@@ -30,6 +30,7 @@ assets/               logo
 vendor/               bibliothèques tierces, versions figées (voir vendor/LICENSES.md)
 supabase/schema.sql   base de données + sécurité (droits, RLS)
 build_demo.py         fabrique une démo en un seul fichier (mode démo)
+version.json          numéro de la version publiée (détection des mises à jour)
 ```
 
 ## Importer le catalogue (Excel ou CSV)
@@ -71,7 +72,14 @@ Connexion : email + mot de passe (lien par email en secours, limité à 2 emails
 
 ## Publier une modification
 
-Tester en local (VS Code, *Go Live*), puis *Source Control* : message, **Commit**, **Sync Changes**. GitHub Pages republie en 1 à 2 minutes ; recharger la page sur la tablette.
+1. **Changer le numéro de version** (format `AAAA-MM-JJ.n`, ex. `2026-11-22.1` → `2026-11-23.1`) :
+   VS Code, `Ctrl+Shift+H` (rechercher et remplacer dans tous les fichiers), ancien numéro → nouveau, **Remplacer tout**.
+   Il apparaît à 5 endroits : `version.json`, `script.js` (`APP_VERSION`) et 3 fois dans `index.html` (`?v=`).
+2. Tester en local (VS Code, *Go Live*, puis `Ctrl+F5`).
+3. *Source Control* : message, **Commit**, **Sync Changes**. GitHub Pages republie en 1 à 2 minutes (puis jusqu'à ~10 minutes de cache).
+4. Sur la tablette, l'appli détecte la nouvelle version (au plus tard 10 minutes après, ou au réveil de la tablette) et affiche **« Nouvelle version disponible : Mettre à jour »**. Si une commande est en cours de saisie, elle demande confirmation avant de recharger.
+
+La version en cours est affichée dans *Réglages > Données*.
 
 ## Points de vigilance
 
