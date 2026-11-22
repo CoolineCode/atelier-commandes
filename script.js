@@ -80,7 +80,8 @@
     copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
     download: '<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>',
     trash: '<path d="M3 6h18M8 6V4h8v2M6 6l1 15h10l1-15"/>',
-    logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>'
+    logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
+    upload: '<path d="M12 21V9M7 14l5-5 5 5M4 3h16"/>'
   };
   const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 
@@ -250,6 +251,25 @@
   /* ------------------------------------------------------------------
      Sources de données
      ------------------------------------------------------------------ */
+  // Bibliothèques tierces hébergées avec l'appli (versions figées, voir vendor/LICENSES.md)
+  const LIBS = {
+    supabase: 'vendor/supabase-js-2.119.2.js',
+    exceljs: 'vendor/exceljs-4.4.0.min.js'
+  };
+  const loadedScripts = new Map();
+  function loadScript(src) {
+    if (loadedScripts.has(src)) return loadedScripts.get(src);
+    const p = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src; s.async = true;
+      s.onload = () => resolve();
+      s.onerror = () => { loadedScripts.delete(src); reject(new Error('Impossible de charger ' + src)); };
+      document.head.appendChild(s);
+    });
+    loadedScripts.set(src, p);
+    return p;
+  }
+
   const DEMO_KEY = 'atelier-reves-demo-v1';
 
   const DemoStore = {
@@ -312,8 +332,9 @@
     sb: null,
     async client() {
       if (this.sb) return this.sb;
-      const mod = await import('https://esm.sh/@supabase/supabase-js@2');
-      this.sb = mod.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY, {
+      await loadScript(LIBS.supabase);
+      if (!window.supabase || !window.supabase.createClient) throw new Error('Bibliothèque Supabase introuvable (' + LIBS.supabase + ')');
+      this.sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY, {
         auth: { flowType: 'pkce', persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
       });
       return this.sb;
@@ -378,8 +399,16 @@
     },
     async upsert(table, row) {
       const sb = await this.client();
-      const r = Object.assign({}, row); if (!r.id) delete r.id;
-      const { data, error } = await sb.from(table).upsert(r).select().single();
+      const r = Object.assign({}, row);
+      if (r.id) {
+        // Mise à jour : seules les colonnes fournies changent
+        const id = r.id; delete r.id; delete r.created_at;
+        const { data, error } = await sb.from(table).update(r).eq('id', id).select().single();
+        if (error) throw error;
+        return data;
+      }
+      delete r.id;
+      const { data, error } = await sb.from(table).insert(r).select().single();
       if (error) throw error;
       return data;
     },
@@ -435,8 +464,9 @@
      ------------------------------------------------------------------ */
   const modalEl = $('#modal'); const modalBox = $('#modal-box');
   let lastFocus = null;
-  function openModal(title, bodyHtml, actionsHtml, onMount) {
+  function openModal(title, bodyHtml, actionsHtml, onMount, opts) {
     lastFocus = document.activeElement;
+    modalBox.classList.toggle('modal-wide', !!(opts && opts.wide));
     modalBox.innerHTML = `<h2 id="modal-title">${esc(title)}</h2><div class="modal-body">${bodyHtml}</div><div class="modal-actions">${actionsHtml}</div>`;
     modalEl.hidden = false;
     if (onMount) onMount(modalBox);
@@ -1321,6 +1351,7 @@
         <div><h1>Catalogue</h1><p>${S.products.filter((p) => p.actif).length} gâteaux proposés${hiddenCount ? `, ${hiddenCount} masqué${hiddenCount > 1 ? 's' : ''}` : ''}</p></div>
         <div class="page-actions">
           ${hiddenCount ? `<button class="btn" id="toggle-hidden">${showHidden ? 'Cacher les gâteaux masqués' : 'Afficher les gâteaux masqués'}</button>` : ''}
+          <button class="btn" id="import-prod">${icon('upload')}Importer (Excel)</button>
           <button class="btn btn-primary" id="add-prod">${icon('plus')}Ajouter un gâteau</button>
         </div>
       </div>
@@ -1336,9 +1367,317 @@
             </div>`).join('')}
         </section>`).join('') : `<div class="empty"><p>Le catalogue est vide. Ajoute ton premier gâteau.</p></div>`}`;
     $('#add-prod').onclick = () => editProduct(null);
+    $('#import-prod').onclick = () => openImport();
     const th = $('#toggle-hidden'); if (th) th.onclick = () => { showHidden = !showHidden; viewCatalogue(); };
     $$('[data-edit]').forEach((b) => b.onclick = () => editProduct(b.dataset.edit));
   }
+  /* ------------------------------------------------------------------
+     Import du catalogue depuis Excel (.xlsx) ou CSV
+     Lit les onglets « Gâteaux BtoC » et « Gâteaux BtoB » de la fiche de
+     cadrage (ou tout tableau aux en-têtes équivalents), rapproche chaque
+     ligne du catalogue existant, puis montre un aperçu avant d'enregistrer.
+     ------------------------------------------------------------------ */
+  const normTxt = (s) => String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const IMPORT_FIELDS = {
+    nom: ['nom du gateau', 'nom du produit', 'nom', 'gateau', 'produit', 'article'],
+    format: ['format nb de parts', 'format conditionnement', 'format', 'nb de parts', 'conditionnement'],
+    prix_ttc: ['prix ttc', 'prix particulier ttc', 'prix particulier'],
+    prix_ht_pro: ['prix ht pro', 'prix pro ht', 'prix pro', 'prix ht professionnel'],
+    tva: ['taux tva', 'taux de tva', 'tva'],
+    categorie: ['categorie'],
+    saison: ['jalon saison', 'saison', 'jalon'],
+    delai_jours: ['delai mini de commande jours', 'delai minimum de commande', 'delai mini', 'delai minimum', 'delai'],
+    allergenes: ['allergenes'],
+    description: ['description courte site', 'description'],
+    statut: ['statut']
+  };
+  const FIELD_LABELS = { format: 'format', categorie: 'catégorie', saison: 'saison', prix_ttc: 'prix TTC', prix_ht_pro: 'prix pro HT', tva: 'TVA', delai_jours: 'délai', allergenes: 'allergènes', description: 'description' };
+
+  function matchHeader(h) {
+    const n = normTxt(h);
+    if (!n || n.includes('auto')) return null; // colonnes calculées (« Prix HT (auto) ») ignorées
+    for (const [field, aliases] of Object.entries(IMPORT_FIELDS)) if (aliases.includes(n)) return field;
+    for (const [field, aliases] of Object.entries(IMPORT_FIELDS)) if (aliases.some((a) => n.startsWith(a + ' '))) return field;
+    return null;
+  }
+  function parseNumber(v) {
+    if (v == null || v === '') return null;
+    if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+    const s = String(v).replace(/[\s  €]/g, '').replace('%', '');
+    const n = Number(s.replace(/\.(?=\d{3}(\D|$))/g, '').replace(',', '.'));
+    return Number.isFinite(n) ? n : null;
+  }
+  function parseTva(v) {
+    if (v == null || v === '') return null;
+    let n = parseNumber(v);
+    if (n == null) return null;
+    if (String(v).includes('%') || n > 1) n = n / 100;
+    return Math.round(n * 10000) / 10000;
+  }
+  function cellText(v) {
+    if (v == null) return '';
+    if (v instanceof Date) return toDateStr(v);
+    if (typeof v === 'object') {
+      if (v.richText) return v.richText.map((r) => r.text).join('');
+      if ('result' in v) return cellText(v.result);
+      if ('text' in v) return String(v.text);
+      if ('error' in v) return '';
+      return '';
+    }
+    return String(v).trim();
+  }
+  function cellRaw(v) {
+    if (v && typeof v === 'object' && !(v instanceof Date)) {
+      if ('result' in v) return v.result;
+      if (v.richText || 'text' in v) return cellText(v);
+      return null;
+    }
+    return v;
+  }
+  function parseCsv(text) {
+    const first = text.split(/\r?\n/, 1)[0] || '';
+    const counts = { ';': (first.match(/;/g) || []).length, ',': (first.match(/,/g) || []).length, '\t': (first.match(/\t/g) || []).length };
+    const sep = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+    const rows = []; let row = []; let cell = ''; let q = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (q) {
+        if (c === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+        else if (c === '"') q = false;
+        else cell += c;
+      } else if (c === '"') q = true;
+      else if (c === sep) { row.push(cell); cell = ''; }
+      else if (c === '\n' || c === '\r') {
+        if (c === '\r' && text[i + 1] === '\n') i++;
+        row.push(cell); rows.push(row); row = []; cell = '';
+      } else cell += c;
+    }
+    if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+    return rows;
+  }
+  async function readTabularFile(file) {
+    const name = file.name.toLowerCase();
+    if (name.endsWith('.csv') || name.endsWith('.txt')) {
+      const text = (await file.text()).replace(/^﻿/, '');
+      return [{ name: file.name, rows: parseCsv(text) }];
+    }
+    if (name.endsWith('.xls')) throw new Error('le format .xls n’est pas pris en charge : enregistre le fichier en .xlsx');
+    if (!name.endsWith('.xlsx')) throw new Error('choisis un fichier .xlsx ou .csv');
+    await loadScript(LIBS.exceljs);
+    const wb = new window.ExcelJS.Workbook();
+    await wb.xlsx.load(await file.arrayBuffer());
+    const sheets = [];
+    wb.eachSheet((ws) => {
+      const rows = [];
+      const cols = ws.columnCount;
+      ws.eachRow({ includeEmpty: true }, (r, n) => {
+        const arr = [];
+        for (let c = 1; c <= cols; c++) arr.push(cellRaw(r.getCell(c).value));
+        rows[n - 1] = arr;
+      });
+      sheets.push({ name: ws.name, rows: Array.from(rows, (r) => r || []) });
+    });
+    return sheets;
+  }
+
+  // Transforme les feuilles en fiches gâteaux, fusionne BtoC et BtoB, rapproche du catalogue
+  function buildImportPlan(sheets) {
+    const records = []; const ignoredSheets = []; let skippedExamples = 0;
+    const keyOf = (nom, format) => normTxt(nom) + '|' + normTxt(format);
+    sheets.forEach((sheet) => {
+      let headerRow = -1; let map = null;
+      for (let i = 0; i < Math.min(sheet.rows.length, 15); i++) {
+        const m = {}; (sheet.rows[i] || []).forEach((h, c) => { const f = matchHeader(cellText(h)); if (f && m[f] == null) m[f] = c; });
+        if (m.nom != null && (m.prix_ttc != null || m.prix_ht_pro != null)) { headerRow = i; map = m; break; }
+      }
+      if (headerRow < 0) { ignoredSheets.push(sheet.name); return; }
+      for (let i = headerRow + 1; i < sheet.rows.length; i++) {
+        const r = sheet.rows[i] || [];
+        const get = (f) => (map[f] == null ? null : r[map[f]]);
+        const nom = cellText(get('nom'));
+        if (!nom) continue;
+        if (normTxt(nom).startsWith('exemple')) { skippedExamples++; continue; }
+        if (normTxt(cellText(get('statut'))) === 'non concerne') continue;
+        const rec = { nom: nom.replace(/\s+/g, ' ').trim(), sheet: sheet.name, line: i + 1, warnings: [] };
+        const fmt = cellText(get('format')); if (fmt) rec.format = fmt;
+        const ttc = parseNumber(cellRaw(get('prix_ttc'))); if (ttc != null) rec.prix_ttc = round2(ttc);
+        const pro = parseNumber(cellRaw(get('prix_ht_pro'))); if (pro != null) rec.prix_ht_pro = round2(pro);
+        const tvaRaw = get('tva'); const tva = parseTva(cellRaw(tvaRaw));
+        if (tva != null) { rec.tva = tva; if (!TVAS.includes(tva)) rec.warnings.push(`TVA inhabituelle (${pct(tva)})`); }
+        ['categorie', 'saison', 'allergenes', 'description'].forEach((f) => { const t = cellText(get(f)); if (t) rec[f] = t; });
+        const delai = parseNumber(cellRaw(get('delai_jours'))); if (delai != null) rec.delai_jours = Math.max(0, Math.round(delai));
+        if (map.prix_ttc != null && cellText(get('prix_ttc')) && ttc == null) rec.warnings.push('prix TTC illisible');
+        if (map.prix_ht_pro != null && cellText(get('prix_ht_pro')) && pro == null) rec.warnings.push('prix pro illisible');
+        records.push(rec);
+      }
+    });
+
+    // Fusion des lignes qui décrivent le même gâteau (ex. onglet BtoC + onglet BtoB)
+    const merged = [];
+    records.forEach((rec) => {
+      let target = merged.find((m) => keyOf(m.nom, m.format) === keyOf(rec.nom, rec.format));
+      if (!target && !rec.format) { const same = merged.filter((m) => normTxt(m.nom) === normTxt(rec.nom)); if (same.length === 1) target = same[0]; }
+      if (!target) { merged.push(Object.assign({}, rec, { sources: [`${rec.sheet}, ligne ${rec.line}`] })); return; }
+      Object.keys(rec).forEach((k) => { if (!['sheet', 'line', 'warnings'].includes(k) && rec[k] != null && rec[k] !== '' && (target[k] == null || target[k] === '')) target[k] = rec[k]; });
+      target.warnings = target.warnings.concat(rec.warnings);
+      target.sources.push(`${rec.sheet}, ligne ${rec.line}`);
+    });
+
+    // Rapprochement avec le catalogue existant
+    const plan = merged.map((rec) => {
+      let existing = S.products.find((p) => keyOf(p.nom, p.format) === keyOf(rec.nom, rec.format));
+      if (!existing) {
+        const same = S.products.filter((p) => normTxt(p.nom) === normTxt(rec.nom));
+        if (same.length === 1 && (!rec.format || !same[0].format)) existing = same[0];
+      }
+      if (rec.tva == null) { rec.tva = existing ? existing.tva : 0.055; if (!existing) rec.warnings.push('TVA absente : 5,5 % par défaut, à faire valider'); }
+      const item = { rec, existing, changes: [], action: '' };
+      if (existing) {
+        Object.keys(FIELD_LABELS).forEach((f) => {
+          if (rec[f] == null || rec[f] === '') return;
+          const a = existing[f]; const b = rec[f];
+          const same = (typeof b === 'number') ? Number(a) === b : normTxt(a) === normTxt(b) && String(a || '').trim() === String(b).trim();
+          if (!same) item.changes.push(f);
+        });
+        item.action = item.changes.length ? 'maj' : 'identique';
+      } else {
+        item.action = (rec.prix_ttc == null && rec.prix_ht_pro == null) ? 'erreur' : 'nouveau';
+        if (item.action === 'erreur') item.error = 'aucun prix';
+      }
+      return item;
+    });
+    return { plan, ignoredSheets, skippedExamples };
+  }
+
+  function openImport() {
+    openModal('Importer des gâteaux', `
+      <p style="margin:0">Choisis un fichier Excel (.xlsx) ou CSV. Les onglets <strong>Gâteaux BtoC</strong> et <strong>Gâteaux BtoB</strong> de la fiche de cadrage sont reconnus, comme tout tableau avec au moins une colonne « Nom du gâteau » et une colonne de prix.</p>
+      <ul class="small muted" style="margin:0;padding-left:18px">
+        <li>Les lignes « Exemple : … » et celles marquées « Non concerné » sont ignorées.</li>
+        <li>Un gâteau déjà au catalogue (même nom et même format) est mis à jour, jamais créé en double.</li>
+        <li>Rien n'est enregistré avant ta confirmation.</li>
+      </ul>
+      <label class="field"><span>Fichier</span><input type="file" id="imp-file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"></label>
+      <p class="small" id="imp-msg" role="status" style="margin:0"></p>
+      <div id="imp-preview"></div>`,
+      `<button class="btn" data-x="template" style="margin-right:auto">${icon('download')}Télécharger le modèle</button>
+       <button class="btn" data-x="cancel">Retour</button>
+       <button class="btn btn-dark" data-x="ok" disabled>Importer</button>`,
+      (box) => {
+        let current = null;
+        const okBtn = box.querySelector('[data-x="ok"]');
+        box.querySelector('[data-x="cancel"]').onclick = closeModal;
+        box.querySelector('[data-x="template"]').onclick = () => guard(downloadImportTemplate, 'Modèle non créé');
+        const refreshCount = () => {
+          const n = current ? current.plan.filter((it) => it.selected).length : 0;
+          okBtn.disabled = !n;
+          okBtn.textContent = n ? `Importer ${n} gâteau${n > 1 ? 'x' : ''}` : 'Importer';
+        };
+        $('#imp-file', box).onchange = async (e) => {
+          const file = e.target.files[0]; if (!file) return;
+          const msg = $('#imp-msg', box); const prev = $('#imp-preview', box);
+          msg.textContent = 'Lecture du fichier…'; prev.innerHTML = ''; current = null; refreshCount();
+          try {
+            const sheets = await readTabularFile(file);
+            current = buildImportPlan(sheets);
+            current.plan.forEach((it) => { it.selected = it.action === 'nouveau' || it.action === 'maj'; });
+            const c = (a) => current.plan.filter((it) => it.action === a).length;
+            msg.innerHTML = current.plan.length
+              ? `<strong>${c('nouveau')}</strong> nouveau${c('nouveau') > 1 ? 'x' : ''}, <strong>${c('maj')}</strong> à mettre à jour, ${c('identique')} déjà à jour${c('erreur') ? `, <span style="color:var(--alerte)">${c('erreur')} en erreur</span>` : ''}${current.skippedExamples ? `, ${current.skippedExamples} exemple${current.skippedExamples > 1 ? 's' : ''} ignoré${current.skippedExamples > 1 ? 's' : ''}` : ''}.`
+              : 'Aucun gâteau trouvé. Vérifie que le tableau a une colonne « Nom du gâteau » et une colonne de prix.';
+            if (current.ignoredSheets.length) msg.innerHTML += `<br><span class="muted">Onglets sans gâteaux, ignorés : ${esc(current.ignoredSheets.join(', '))}.</span>`;
+            renderImportPreview(prev, current.plan, refreshCount);
+          } catch (err) {
+            console.error(err); msg.textContent = 'Lecture impossible : ' + (err.message || err);
+          }
+          refreshCount();
+        };
+        okBtn.onclick = async () => {
+          if (!current) return;
+          const todo = current.plan.filter((it) => it.selected);
+          okBtn.disabled = true; box.querySelector('[data-x="cancel"]').disabled = true;
+          let added = 0; let updated = 0;
+          try {
+            for (const it of todo) {
+              okBtn.textContent = `Enregistrement ${added + updated + 1} / ${todo.length}…`;
+              let row;
+              if (it.existing) {
+                row = { id: it.existing.id };
+                it.changes.forEach((f) => { row[f] = it.rec[f]; });
+              } else {
+                row = { nom: it.rec.nom, format: it.rec.format || '', categorie: it.rec.categorie || 'Autre', saison: it.rec.saison || "Toute l'année",
+                  prix_ttc: it.rec.prix_ttc != null ? it.rec.prix_ttc : null, prix_ht_pro: it.rec.prix_ht_pro != null ? it.rec.prix_ht_pro : null,
+                  tva: it.rec.tva, delai_jours: it.rec.delai_jours != null ? it.rec.delai_jours : 2,
+                  allergenes: it.rec.allergenes || '', description: it.rec.description || '', actif: true };
+              }
+              const saved = await store.upsert('products', row);
+              const i = S.products.findIndex((x) => x.id === saved.id);
+              if (i >= 0) S.products[i] = Object.assign({}, S.products[i], saved); else S.products.push(saved);
+              if (it.existing) updated++; else added++;
+            }
+            closeModal();
+            toast(`${added} gâteau${added > 1 ? 'x' : ''} ajouté${added > 1 ? 's' : ''}, ${updated} mis à jour`);
+            router();
+          } catch (err) {
+            console.error(err);
+            $('#imp-msg', box).innerHTML = `<span style="color:var(--alerte)">Import interrompu : ${esc(err.message || err)}. ${added + updated} gâteau${added + updated > 1 ? 'x' : ''} déjà enregistré${added + updated > 1 ? 's' : ''} : recharge le catalogue avant de relancer l'import.</span>`;
+            box.querySelector('[data-x="cancel"]').disabled = false;
+            okBtn.textContent = 'Import interrompu';
+          }
+        };
+      }, { wide: true });
+  }
+
+  function renderImportPreview(container, plan, onChange) {
+    if (!plan.length) { container.innerHTML = ''; return; }
+    const ACTION = { nouveau: ['Nouveau', 'st-prete'], maj: ['Mise à jour', 'st-preparation'], identique: ['Déjà à jour', 'st-retiree'], erreur: ['Erreur', 'st-annulee'] };
+    container.innerHTML = `<div class="table-wrap import-table"><table class="list">
+      <thead><tr><th><span class="sr">Importer</span></th><th>Gâteau</th><th>Action</th><th class="right">Prix TTC</th><th class="right">Pro HT</th><th class="right">TVA</th></tr></thead>
+      <tbody>${plan.map((it, i) => {
+        const r = it.rec; const [label, cls] = ACTION[it.action];
+        const show = (f, v) => (v == null || v === '') ? 'vide'
+          : (f === 'prix_ttc' || f === 'prix_ht_pro') ? eur(v) : f === 'tva' ? pct(v) : f === 'delai_jours' ? `${v} j` : null;
+        const detail = it.action === 'maj' ? 'Change : ' + it.changes.map((f) => {
+          const before = show(f, it.existing[f]); const after = show(f, r[f]);
+          return after != null && before != null ? `${FIELD_LABELS[f]} ${before} → ${after}` : FIELD_LABELS[f];
+        }).join(', ')
+          : it.action === 'erreur' ? it.error : '';
+        const notes = [detail, ...r.warnings].filter(Boolean);
+        return `<tr>
+          <td><input type="checkbox" data-i="${i}" ${it.selected ? 'checked' : ''} ${it.action === 'identique' || it.action === 'erreur' ? 'disabled' : ''} aria-label="Importer ${esc(r.nom)}" style="width:20px;height:20px;accent-color:var(--rose-encre)"></td>
+          <td><strong>${esc(r.nom)}</strong>${r.format ? ` <span class="muted">(${esc(r.format)})</span>` : ''}
+            ${notes.length ? `<div class="small" style="color:${r.warnings.length || it.action === 'erreur' ? 'var(--alerte)' : 'var(--taupe)'}">${esc(notes.join('. '))}</div>` : ''}</td>
+          <td><span class="pill ${cls}">${label}</span></td>
+          <td class="right num">${r.prix_ttc != null ? eur(r.prix_ttc) : '–'}</td>
+          <td class="right num">${r.prix_ht_pro != null ? eur(r.prix_ht_pro) : '–'}</td>
+          <td class="right num">${r.tva != null ? pct(r.tva) : '–'}</td>
+        </tr>`;
+      }).join('')}</tbody></table></div>`;
+    container.querySelectorAll('[data-i]').forEach((cb) => cb.onchange = () => { plan[Number(cb.dataset.i)].selected = cb.checked; onChange(); });
+  }
+
+  async function downloadImportTemplate() {
+    await loadScript(LIBS.exceljs);
+    const wb = new window.ExcelJS.Workbook();
+    const head = (ws, cols) => {
+      ws.columns = cols.map(([h, w]) => ({ header: h, width: w }));
+      ws.getRow(1).font = { bold: true };
+      ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCDCDA' } };
+      ws.views = [{ state: 'frozen', ySplit: 1 }];
+    };
+    const c = wb.addWorksheet('Gâteaux BtoC');
+    head(c, [['Nom du gâteau', 32], ['Format / nb de parts', 18], ['Prix TTC (€)', 14], ['Taux TVA', 10], ['Catégorie', 20], ['Jalon / saison', 16], ['Délai mini de commande (jours)', 16], ['Allergènes', 34], ['Description courte (site)', 40], ['Statut', 14]]);
+    c.addRow(['Exemple : Bûche praliné noisette', '6 parts', 32, 0.055, 'Bûche', 'Noël', 3, 'Gluten, œufs, lait, fruits à coque', 'Biscuit noisette, mousse praliné', 'Exemple']);
+    c.getColumn(4).numFmt = '0.0%';
+    const b = wb.addWorksheet('Gâteaux BtoB');
+    head(b, [['Nom du gâteau', 32], ['Format / conditionnement', 22], ['Prix HT pro (€)', 14], ['Taux TVA', 10], ['Délai mini de commande (jours)', 16], ['Statut', 14]]);
+    b.addRow(['Exemple : Plateau mignardises', '50 pièces', 55, 0.055, 4, 'Exemple']);
+    b.getColumn(4).numFmt = '0.0%';
+    const buf = await wb.xlsx.writeBuffer();
+    download('modele-import-catalogue.xlsx', buf, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  }
+
   function editProduct(id) {
     const p = id ? productById(id) : { nom: '', format: '', categorie: CATEGORIES[0], saison: SAISONS[0], prix_ttc: '', prix_ht_pro: '', tva: 0.055, delai_jours: 2, allergenes: '', description: '', actif: true };
     const used = id && S.items.some((i) => i.product_id === id);

@@ -1,7 +1,8 @@
 # Commandes · L'Atelier des Rêves
 
 Appli de prise de commande pour la pâtisserie (V1, avant le site internet).
-Utilisée par Ophélie seule, sur ordinateur, tablette ou téléphone.
+Utilisée par Ophélie, sur ordinateur, tablette ou téléphone.
+En ligne : https://coolinecode.github.io/atelier-commandes/
 
 ## Ce que fait la V1
 
@@ -12,8 +13,8 @@ Utilisée par Ophélie seule, sur ordinateur, tablette ou téléphone.
 | **Détail d'une commande** | Statut (Reçue → En préparation → Prête → Retirée), encaissement du solde, modification, « Recommander », impression du bon, annulation. |
 | **Commandes** | Recherche (nom, téléphone, n°, gâteau), filtres par période et statut, export CSV pour Excel. |
 | **Planning** | Vue de la semaine (charge par jour) et tableau de production gâteau × jour. |
-| **Catalogue** | Gâteaux : prix particulier TTC, prix pro HT, TVA, délai minimum, saison, allergènes, masquer/afficher. |
-| **Réglages** | Horaires de retrait, durée des créneaux, capacités, fermetures exceptionnelles, temps forts (Noël, galette…), sauvegarde. |
+| **Catalogue** | Gâteaux : prix particulier TTC, prix pro HT, TVA, délai minimum, saison, allergènes, masquer/afficher. **Import Excel ou CSV** avec aperçu. |
+| **Réglages** | Horaires de retrait, durée des créneaux, capacités, fermetures exceptionnelles, temps forts (Noël, galette…), mot de passe, sauvegarde. |
 
 Pas d'acompte en V1 : tout se paie au retrait (ou est noté « Déjà payée »).
 
@@ -23,49 +24,64 @@ Pas d'acompte en V1 : tout se paie au retrait (ou est noté « Déjà payée »)
 index.html            structure de la page
 style.css             apparence (blanc dominant, rose #F7A19E, logo rond)
 script.js             toute la logique de l'appli
-config.js             mode démo / Supabase (à remplir)
+config.js             mode démo / Supabase (URL du projet + clé publishable)
 manifest.webmanifest  installation sur l'écran d'accueil
 assets/               logo
-supabase/schema.sql   base de données + sécurité (à exécuter une fois)
+vendor/               bibliothèques tierces, versions figées (voir vendor/LICENSES.md)
+supabase/schema.sql   base de données + sécurité (droits, RLS)
+build_demo.py         fabrique une démo en un seul fichier (mode démo)
 ```
 
-## 1. Tester tout de suite (mode démo)
+## Importer le catalogue (Excel ou CSV)
 
-Ouvre `index.html` avec l'extension **Live Server** de VS Code (clic droit > *Open with Live Server*).
-Les données d'exemple sont stockées dans le navigateur : rien n'est partagé, rien n'est envoyé.
+*Catalogue > Importer (Excel)*, puis choisir un fichier `.xlsx` ou `.csv`.
 
-## 2. Passer en vraies données (Supabase, gratuit au départ)
+- Reconnaît les onglets **Gâteaux BtoC** et **Gâteaux BtoB** de la fiche de cadrage exportée en Excel, ou tout tableau avec une colonne « Nom du gâteau » et une colonne de prix (« Prix TTC » et/ou « Prix HT pro »).
+- Colonnes lues si présentes : format, prix TTC, prix HT pro, taux TVA, catégorie, saison, délai minimum, allergènes, description, statut.
+- Ignore : les lignes « Exemple : … », les lignes au statut « Non concerné », les colonnes calculées « (auto) », les autres onglets.
+- Un gâteau déjà au catalogue (même nom + même format) est **mis à jour**, jamais créé en double. Une ligne BtoB qui porte le même nom et le même format qu'une ligne BtoC ajoute le prix pro au même gâteau.
+- Aperçu avant enregistrement : nouveau / mise à jour (avec ancienne → nouvelle valeur) / déjà à jour / erreur. On peut décocher des lignes.
+- Relancer le même fichier ne change rien : tout passe en « déjà à jour ».
+- *Télécharger le modèle* fournit un fichier Excel vierge au bon format.
+- Les fichiers `.xls` (ancien format) ne sont pas lus : les enregistrer en `.xlsx`.
 
-1. Crée un compte sur supabase.com, puis un projet (région **Europe**, ex. Paris ou Francfort).
-2. **SQL Editor > New query** : colle tout `supabase/schema.sql`, clique **Run**.
-3. Toujours dans SQL Editor, autorise l'adresse d'Ophélie :
-   ```sql
-   insert into public.app_admins (email) values ('adresse-d-ophelie@exemple.fr');
-   ```
-4. **Authentication > Users > Add user > Create new user** : même adresse, coche *Auto confirm user*.
-5. **Authentication > Sign In / Providers** : désactive **Allow new users to sign up** (personne d'autre ne pourra créer de compte).
-6. **Authentication > URL Configuration** : mets l'adresse où l'appli sera publiée dans *Site URL* et *Redirect URLs* (ex. `https://ton-compte.github.io/atelier-commandes/`).
-7. **Project Settings > API** : copie *Project URL* et la clé *anon public* dans `config.js`, et passe `MODE` à `'supabase'`.
+## Bibliothèques (versions figées)
 
-La clé *anon* est faite pour être publique : la sécurité repose sur les règles RLS du schéma (seules les adresses de `app_admins` voient les données). Ne mets **jamais** la clé `service_role` dans le code.
+Les bibliothèques sont copiées dans `vendor/` au lieu d'être chargées depuis un CDN : une mise à jour imprévue ne peut pas casser l'appli, et aucun tiers ne sert de code à la page.
 
-Connexion : Ophélie saisit son email, reçoit un lien, clique : c'est tout (pas de mot de passe).
+| Fichier | Rôle | Chargé |
+|---|---|---|
+| `vendor/supabase-js-2.119.2.js` | Connexion à Supabase | au démarrage (mode Supabase) |
+| `vendor/exceljs-4.4.0.min.js` | Lecture/écriture Excel | seulement à l'ouverture de l'import |
 
-## 3. Mettre en ligne (GitHub Pages)
+Pour mettre à jour une bibliothèque : remplacer le fichier, changer son nom dans `script.js` (constante `LIBS`), tester en local, puis publier.
+SheetJS (`xlsx`) n'est volontairement pas utilisé : la version publiée sur npm (0.18.5) a des failles connues non corrigées.
 
-1. Crée un dépôt `atelier-commandes`, pousse les fichiers.
-2. **Settings > Pages** : *Deploy from a branch*, branche `main`, dossier `/ (root)`.
-3. Sur la tablette ou le téléphone : ouvre l'adresse, puis « Ajouter à l'écran d'accueil ».
+## Installation (déjà faite, pour mémoire)
+
+1. Supabase (projet en Europe) : exécuter `supabase/schema.sql` dans *SQL Editor*.
+2. Autoriser les adresses : `insert into public.app_admins (email) values ('adresse@exemple.fr');`
+3. *Authentication > Users > Add user* : même adresse, mot de passe, *Auto Confirm User*.
+4. *Authentication* : inscriptions désactivées, connexions anonymes désactivées.
+5. *Authentication > URL Configuration* : Site URL et Redirect URLs (`…/atelier-commandes/**`).
+6. *Project Settings > API Keys* : URL du projet et clé **publishable** (`sb_publishable_…`) dans `config.js`, `MODE: 'supabase'`. Jamais de clé `sb_secret_` ou `service_role`.
+7. GitHub Pages : *Settings > Pages*, branche `main`, dossier `/ (root)`.
+
+Connexion : email + mot de passe (lien par email en secours, limité à 2 emails/heure sans SMTP personnalisé).
+
+## Publier une modification
+
+Tester en local (VS Code, *Go Live*), puis *Source Control* : message, **Commit**, **Sync Changes**. GitHub Pages republie en 1 à 2 minutes ; recharger la page sur la tablette.
 
 ## Points de vigilance
 
-- **TVA** : les prix et le taux de 5,5 % du catalogue de démo sont des exemples. Les taux réels sont à faire valider par son comptable avant usage.
+- **TVA** : les taux réels sont à faire valider par le comptable.
 - **Pas de facture** en V1 : le « bon » imprimé n'est pas une facture.
-- **Sauvegardes** : Supabase gratuit ne fait pas de sauvegarde téléchargeable ; utiliser régulièrement *Réglages > Télécharger une sauvegarde* (fichier JSON).
-- Les projets Supabase gratuits sont mis en pause après une période d'inactivité : à vérifier sur leur grille tarifaire avant de compter dessus en production.
-- Données personnelles des clients (nom, téléphone, email) : à mentionner dans sa politique de confidentialité (RGPD).
+- **Sauvegardes** : le plan gratuit de Supabase n'en fait pas ; *Réglages > Télécharger une sauvegarde* chaque semaine, rangée dans un dossier privé (données clients).
+- **Mise en pause** : un projet gratuit est mis en pause après une semaine sans activité (ex. congés) ; le relancer depuis le tableau de bord Supabase.
+- **RGPD** : données clients (nom, téléphone, email) à mentionner dans la politique de confidentialité.
 
 ## Pour la suite (V2)
 
 Le futur site lira la même base : catalogue, créneaux et capacité sont déjà là.
-À ajouter : acompte en ligne, emails de confirmation et de rappel, factures, fidélité, espace pro.
+À ajouter : acompte en ligne, emails de confirmation et de rappel (SMTP personnalisé), factures, fidélité, espace pro.
