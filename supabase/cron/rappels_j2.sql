@@ -19,11 +19,12 @@ create extension if not exists pg_net;
 --    puis effacer la valeur de l'éditeur.
 -- select vault.create_secret('COLLER_ICI_LA_MEME_VALEUR_QUE_CRON_SECRET', 'cron_secret');
 
--- 3. Appel de la fonction chaque heure (à 5 minutes) ; c'est la fonction
---    qui décide d'envoyer, à partir de l'heure réglée (heure de Paris).
+-- 3. Appel de la fonction chaque heure, à h 35 ; c'est la fonction qui
+--    décide d'envoyer, à partir de l'heure réglée (11 h 30 par défaut,
+--    heure de Paris). Premier envoi possible : 11 h 35.
 select cron.schedule(
   'rappels-commandes',
-  '5 * * * *',
+  '35 * * * *',
   $$
   select net.http_post(
     url := 'https://nbxfjxfbefzaonrbhitj.supabase.co/functions/v1/send-reminders',

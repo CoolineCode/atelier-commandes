@@ -67,12 +67,30 @@ export function safeEqual(a: string, b: string): boolean {
 }
 
 /** Date et heure actuelles à Paris (gère l'heure d'été). */
-export function parisNow(now = new Date()): { date: string; hour: number } {
+export function parisNow(now = new Date()): { date: string; hour: number; minutes: number } {
   const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23'
+    timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
   }).formatToParts(now);
   const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
-  return { date: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour')) };
+  const hour = Number(get('hour'));
+  return { date: `${get('year')}-${get('month')}-${get('day')}`, hour, minutes: hour * 60 + Number(get('minute')) };
+}
+
+/** Heure réglée (« 11:30 » ou 11.5) convertie en minutes depuis minuit. */
+export function heureEnMinutes(v: unknown, defaut = 11 * 60 + 30): number {
+  if (typeof v === 'number' && Number.isFinite(v)) return Math.round(v * 60);
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(v ?? ''));
+  return m ? Number(m[1]) * 60 + Number(m[2]) : defaut;
+}
+
+/** Lignes d'une commande, complétées des allergènes de la fiche catalogue. */
+export async function itemsAvecAllergenes(sb: SupabaseClient, orderId: string): Promise<Record<string, unknown>[]> {
+  const { data: items } = await sb.from('order_items').select('*').eq('order_id', orderId).order('position');
+  const ids = [...new Set((items ?? []).map((i) => i.product_id).filter(Boolean))];
+  if (!ids.length) return items ?? [];
+  const { data: products } = await sb.from('products').select('id, allergenes').in('id', ids);
+  const map = new Map((products ?? []).map((p) => [p.id, p.allergenes ?? '']));
+  return (items ?? []).map((i) => ({ ...i, allergenes: map.get(i.product_id) ?? '' }));
 }
 export function addDays(dateStr: string, n: number): string {
   const [y, m, d] = dateStr.split('-').map(Number);

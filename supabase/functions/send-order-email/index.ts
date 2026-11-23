@@ -7,7 +7,7 @@
 //  toujours l'email enregistré sur la commande (pas un paramètre libre).
 // =====================================================================
 import { buildEmail } from '../_shared/email-template.js';
-import { corsHeaders, isEmail, json, sendWithBrevo, sender, userClient } from '../_shared/common.ts';
+import { corsHeaders, isEmail, itemsAvecAllergenes, json, sendWithBrevo, sender, userClient } from '../_shared/common.ts';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -33,8 +33,8 @@ Deno.serve(async (req) => {
   if (!order) return json(req, 404, { error: 'commande_introuvable' });
   if (!isEmail(order.client_email)) return json(req, 422, { error: 'email_client_absent' });
 
-  const [{ data: items }, { data: settingsRow }] = await Promise.all([
-    sb.from('order_items').select('*').eq('order_id', order.id).order('position'),
+  const [items, { data: settingsRow }] = await Promise.all([
+    itemsAvecAllergenes(sb, order.id),
     sb.from('settings').select('data').eq('id', 1).maybeSingle()
   ]);
   const settings = (settingsRow?.data ?? {}) as Record<string, any>;
@@ -46,7 +46,7 @@ Deno.serve(async (req) => {
     to: order.client_email, toName: order.client_nom, subject: mail.subject, html: mail.html, text: mail.text,
     fromEmail: from.email, fromName: from.name,
     replyTo: settings?.boutique?.email || from.email,
-    bcc: settings?.email_copie || undefined
+    bcc: settings?.email_copie_boutique === false ? undefined : (settings?.boutique?.email || undefined)
   });
 
   await sb.from('email_log').insert({

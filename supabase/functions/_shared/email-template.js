@@ -43,7 +43,10 @@ export function montants(order) {
 /** Lieu de retrait (nom, adresse, consignes) à partir des réglages. */
 export function lieuDe(order, settings) {
   const lieux = (settings && settings.lieux) || [];
-  return lieux.find((l) => l.id === (order.lieu_retrait || 'boutique')) || lieux[0] || { nom: 'À la boutique', adresse: '', infos: '' };
+  const l = lieux.find((x) => x.id === (order.lieu_retrait || 'boutique')) || lieux[0] || { id: 'boutique', nom: 'À la boutique', adresse: '', infos: '' };
+  // Retrait à la boutique sans adresse propre : on reprend celle de la boutique
+  const adresse = (l.adresse || (l.id === 'boutique' && settings && settings.boutique ? settings.boutique.adresse : '') || '').trim();
+  return Object.assign({}, l, { adresse });
 }
 
 function contexte(order, items, settings) {
@@ -56,6 +59,12 @@ function contexte(order, items, settings) {
     lieu: lieuDe(order, s),
     boutique: { nom: b.nom || "L'Atelier des Rêves", adresse: b.adresse || '', telephone: b.telephone || '', email: b.email || '' },
     paiement: s.paiement_texte || 'Carte bancaire ou espèces',
+    // « Bon à savoir » : allergènes des gâteaux commandés (fiche catalogue), conservation, annulation
+    allergenes: (items || []).filter((i) => i.allergenes && String(i.allergenes).trim())
+      .map((i) => ({ libelle: i.libelle, allergenes: String(i.allergenes).trim() }))
+      .filter((a, idx, arr) => arr.findIndex((b) => b.libelle === a.libelle) === idx),
+    conservation: (s.email_conservation || '').trim(),
+    annulation: (s.email_annulation || '').trim(),
     pied: s.email_pied || '',
     siteUrl: s.site_url || DEFAULT_SITE_URL
   };
@@ -97,6 +106,11 @@ export function buildEmail(kind, order, items, settings) {
     m.paye ? null : `Moyens de paiement acceptés : ${x.paiement}`,
     o.message_gateau ? `\nInscription sur le gâteau : « ${o.message_gateau} »` : null,
     o.allergies ? `Allergies signalées : ${o.allergies}` : null, '',
+    (x.allergenes.length || x.conservation || x.annulation) ? 'BON À SAVOIR' : null,
+    x.allergenes.length ? 'Allergènes :\n' + x.allergenes.map((a) => `- ${a.libelle} : ${a.allergenes}`).join('\n') : null,
+    x.conservation ? `Conservation : ${x.conservation}` : null,
+    x.annulation ? `Annulation : ${x.annulation}` : null,
+    (x.allergenes.length || x.conservation || x.annulation) ? '' : null,
     x.pied || null,
     `${boutique.nom}${boutique.adresse ? ' · ' + boutique.adresse : ''}`,
     [boutique.telephone, boutique.email].filter(Boolean).join(' · ') || null
@@ -154,6 +168,16 @@ export function buildEmail(kind, order, items, settings) {
         <tr><td style="padding-top:14px;font:14px/1.5 ${FONT};color:${C.cacao};">
           ${o.message_gateau ? `Inscription sur le gâteau&nbsp;: <strong>«&nbsp;${esc(o.message_gateau)}&nbsp;»</strong><br>` : ''}
           ${o.allergies ? `Allergies signalées&nbsp;: <strong>${esc(o.allergies)}</strong>` : ''}
+        </td></tr>
+      </table>` : ''}
+
+      ${x.allergenes.length || x.conservation || x.annulation ? `
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:22px;background:${C.roseVoile};border-radius:14px;">
+        <tr><td style="padding:14px 18px;font:14px/1.55 ${FONT};color:${C.cacao};">
+          <p style="margin:0 0 6px;font:600 13px/1.4 ${FONT};color:${C.roseEncre};">Bon à savoir</p>
+          ${x.allergenes.length ? `<p style="margin:0 0 8px;"><strong>Allergènes</strong><br>${x.allergenes.map((a) => `${esc(a.libelle)}&nbsp;: ${esc(a.allergenes)}`).join('<br>')}</p>` : ''}
+          ${x.conservation ? `<p style="margin:0 0 8px;"><strong>Conservation</strong><br>${nl2br(x.conservation)}</p>` : ''}
+          ${x.annulation ? `<p style="margin:0;"><strong>Annulation</strong><br>${nl2br(x.annulation)}</p>` : ''}
         </td></tr>
       </table>` : ''}
     </td></tr>

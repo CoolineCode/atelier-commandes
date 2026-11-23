@@ -12,7 +12,7 @@
   //  À changer à chaque publication, en même temps que version.json et
   //  les « ?v=... » de index.html (VS Code : Ctrl+Shift+H, remplacer partout).
   // =====================================================================
-  const APP_VERSION = '2026-11-22.1';
+  const APP_VERSION = '2026-11-23.1';
 
   const CFG = Object.assign({ MODE: 'demo', SUPABASE_URL: '', SUPABASE_ANON_KEY: '', NOM_BOUTIQUE: "L'Atelier des Rêves" }, window.APP_CONFIG || {});
   const logoImg = document.querySelector('.rail-logo img');
@@ -105,6 +105,8 @@
   const FLOW = ['recue', 'preparation', 'prete', 'retiree'];
   const CANAUX = { telephone: 'Téléphone', boutique: 'En boutique', email: 'Email', reseaux: 'Réseaux sociaux', autre: 'Autre' };
   const MOYENS = ['Carte bancaire', 'Espèces', 'Chèque', 'Virement', 'Autre'];
+  const MOYENS_ACOMPTE = ['Carte bancaire', 'Espèces', 'Chèque', 'Virement', 'Lien SumUp'];
+  const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(v || '').trim());
   const TVAS = [0.055, 0.10, 0.20];
   const CATEGORIES = ['Entremets', 'Tarte', 'Bûche', 'Galette', "Gâteau d'anniversaire", 'Pièce montée / wedding cake', 'Petits gâteaux', 'Viennoiserie', 'Chocolat / confiserie', 'Autre'];
   const SAISONS = ["Toute l'année", 'Galette', 'Saint-Valentin', 'Pâques', 'Fête des mères', 'Fête des pères', 'Été', 'Halloween', 'Noël', 'Autre'];
@@ -122,16 +124,42 @@
       5: { ouvert: true, debut: '08:00', fin: '19:00', pause_debut: '', pause_fin: '' },
       6: { ouvert: true, debut: '08:00', fin: '19:00', pause_debut: '', pause_fin: '' }
     },
-    fermetures: []
+    fermetures: [],
+    // Boutique : les retraits se font uniquement à la boutique (adresse reprise dans les emails)
+    boutique: { nom: "L'Atelier des Rêves", adresse: '47 rue Pierre Catteau, 59110 Leers', telephone: '', email: '' },
+    lieux: [{ id: 'boutique', nom: 'À la boutique', adresse: '', infos: '' }],
+    // Acompte et emails
+    acompte_defaut: 10,
+    paiement_texte: 'Carte bancaire ou espèces',
+    email_conservation: '',
+    email_annulation: '',
+    email_pied: '',
+    email_expediteur: '',
+    email_copie_boutique: true,
+    // Rappel avant le retrait (envoyé par Supabase, désactivé tant qu'il n'est pas validé)
+    rappel_actif: false,
+    rappel_heure: '11:30',
+    rappel_jours: 2
   };
   const mergeSettings = (data) => {
     const d = data || {};
     const out = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
-    ['creneau_minutes', 'max_commandes_creneau', 'capacite_jour'].forEach((k) => { if (d[k] != null) out[k] = Number(d[k]); });
+    ['creneau_minutes', 'max_commandes_creneau', 'capacite_jour', 'acompte_defaut', 'rappel_jours'].forEach((k) => { if (d[k] != null && d[k] !== '') out[k] = Number(d[k]); });
+    if (typeof d.rappel_heure === 'number') out.rappel_heure = `${pad(Math.floor(d.rappel_heure))}:${pad(Math.round((d.rappel_heure % 1) * 60))}`;
+    else if (/^\d{2}:\d{2}$/.test(d.rappel_heure || '')) out.rappel_heure = d.rappel_heure;
     if (d.horaires) for (let i = 0; i < 7; i++) if (d.horaires[i]) out.horaires[i] = Object.assign(out.horaires[i], d.horaires[i]);
     if (Array.isArray(d.fermetures)) out.fermetures = d.fermetures;
+    if (d.boutique) out.boutique = Object.assign(out.boutique, d.boutique);
+    if (Array.isArray(d.lieux)) out.lieux = out.lieux.map((l) => Object.assign(l, d.lieux.find((x) => x.id === l.id) || {}));
+    ['paiement_texte', 'email_conservation', 'email_annulation', 'email_pied', 'email_expediteur', 'site_url'].forEach((k) => { if (typeof d[k] === 'string') out[k] = d[k]; });
+    ['email_copie_boutique', 'rappel_actif'].forEach((k) => { if (typeof d[k] === 'boolean') out[k] = d[k]; });
     return out;
   };
+  const lieuById = (id) => S.settings.lieux.find((l) => l.id === (id || 'boutique')) || S.settings.lieux[0];
+  const lieuAdresse = (l) => (l.adresse || (l.id === 'boutique' ? S.settings.boutique.adresse : '') || '').trim();
+  // Montants d'une commande : reste à payer = total TTC moins l'acompte (0 si déjà payée)
+  const acompteOf = (o) => round2(Number(o.acompte_montant) || 0);
+  const resteOf = (o) => o.paye ? 0 : Math.max(0, round2(Number(o.total_ttc || 0) - acompteOf(o)));
 
   /* ------------------------------------------------------------------
      Données de démonstration (relatives à la date du jour)
@@ -180,6 +208,7 @@
         customer_id: c.id, client_nom: c.nom, client_tel: c.telephone, client_email: c.email,
         type: c.type, canal: 'telephone', date_retrait: addDays(t, dayOffset), creneau, statut: statut || 'recue',
         message_gateau: '', allergies: '', notes: '', paye: false, moyen_paiement: null, paye_le: null,
+        acompte_montant: 0, acompte_moyen: null, acompte_le: null, lieu_retrait: 'boutique', confirmation_envoyee_le: null, rappel_envoye_le: null,
         created_at: new Date(Date.now() - 86400000 * 3).toISOString(), updated_at: new Date().toISOString()
       }, extra || {});
       const its = lines.map(([nom, q], i) => {
@@ -198,7 +227,7 @@
     O(0, '11:00', 'Julien Morel', [['Number cake', 1]], 'preparation', { message_gateau: 'Joyeux anniversaire Léon — chiffre 7', allergies: 'Sans fruits à coque' });
     O(0, '15:00', 'Sophie Dubois', [['Fraisier', 1], ['Tarte citron meringuée', 1]], 'recue');
     O(0, '17:30', 'Nadia Benali', [['Entremets trois chocolats', 1]], 'recue', { canal: 'boutique', paye: true, moyen_paiement: 'Espèces', paye_le: new Date().toISOString() });
-    O(1, '10:30', 'Lucas Vermeulen', [['Fraisier', 2]], 'recue', { message_gateau: 'Bon départ Claire !' });
+    O(1, '10:30', 'Lucas Vermeulen', [['Fraisier', 2]], 'recue', { message_gateau: 'Bon départ Claire !', acompte_montant: 20, acompte_moyen: 'Espèces', acompte_le: new Date().toISOString() });
     O(1, '12:00', 'Café du Parvis', [['Assortiment de mignardises', 3], ['Tarte citron meringuée', 2]], 'recue', { canal: 'email' });
     O(1, '16:00', 'Élodie Lambert', [['Paris-Brest', 1]], 'recue');
     O(2, '09:00', 'Marie Delattre', [['Entremets trois chocolats', 1], ['Assortiment de mignardises', 1]], 'recue');
@@ -207,7 +236,7 @@
     O(5, '10:00', 'Sophie Dubois', [['Tarte citron meringuée', 2]], 'recue');
     const xmas = `${y}-12-24`;
     if (diffDays(xmas, t) > 0) {
-      O(diffDays(xmas, t), '09:00', 'Élodie Lambert', [['Bûche praliné noisette', 1]], 'recue');
+      O(diffDays(xmas, t), '09:00', 'Élodie Lambert', [['Bûche praliné noisette', 1]], 'recue', { acompte_montant: 10, acompte_moyen: 'Lien SumUp', acompte_le: new Date().toISOString() });
       O(diffDays(xmas, t), '09:30', 'Julien Morel', [['Bûche chocolat intense', 1], ['Bûche framboise vanille', 1]], 'recue');
       O(diffDays(xmas, t), '10:00', 'Cabinet Leroy & Associés', [['Bûche praliné noisette', 6]], 'recue', { canal: 'email' });
     }
@@ -430,6 +459,17 @@
       if (error) throw error;
       return s;
     },
+    async sendOrderEmail(orderId) {
+      const sb = await this.client();
+      const { data, error } = await sb.functions.invoke('send-order-email', { body: { order_id: orderId, type: 'confirmation' } });
+      if (!error) return data;
+      // Erreur renvoyée par la fonction : on lit son code (ex. email_non_configure)
+      let body = {}; const status = error.context && error.context.status;
+      try { body = await error.context.json(); } catch (e) { /* réponse sans JSON */ }
+      const e = new Error(body.detail || body.error || error.message || 'envoi impossible');
+      e.code = body.error || (status === 404 ? 'fonction_absente' : 'erreur'); e.status = status;
+      throw e;
+    },
     async signOut() { const sb = await this.client(); await sb.auth.signOut(); }
   };
 
@@ -515,6 +555,85 @@
   }
 
   /* ------------------------------------------------------------------
+     Emails aux clients
+     Le modèle est partagé avec les fonctions Supabase qui envoient les
+     emails : supabase/functions/_shared/email-template.js
+     ------------------------------------------------------------------ */
+  let emailTplPromise = null;
+  const emailTpl = () => (emailTplPromise = emailTplPromise ||
+    import('./supabase/functions/_shared/email-template.js?v=' + APP_VERSION).catch((e) => { emailTplPromise = null; throw e; }));
+  const emailSettings = () => {
+    const st = S.settings;
+    return Object.assign({}, st, { lieux: st.lieux.map((l) => Object.assign({}, l, { adresse: lieuAdresse(l) })) });
+  };
+  async function buildOrderEmail(kind, o) {
+    const tpl = await emailTpl();
+    // Allergènes repris de la fiche catalogue de chaque gâteau
+    const items = itemsOf(o.id).map((i) => { const p = i.product_id && productById(i.product_id); return Object.assign({}, i, { allergenes: p ? p.allergenes || '' : '' }); });
+    return tpl.buildEmail(kind, o, items, emailSettings());
+  }
+  const mailtoHref = (to, mail) => `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(mail.subject)}&body=${encodeURIComponent(mail.text)}`;
+
+  // Aperçu de l'email (tel que le client le recevra)
+  async function previewEmail(kind, o) {
+    const mail = await guard(() => buildOrderEmail(kind, o), 'Aperçu impossible');
+    if (!mail) return;
+    openModal(kind === 'rappel' ? 'Aperçu du rappel' : 'Aperçu de la confirmation',
+      `<p class="small muted" style="margin:0">Objet : <strong>${esc(mail.subject)}</strong></p>
+       <iframe class="email-preview" title="Aperçu de l'email" sandbox></iframe>`,
+      `<button class="btn btn-dark" data-x="close">Fermer</button>`,
+      (box) => { box.querySelector('iframe').srcdoc = mail.html; box.querySelector('[data-x="close"]').onclick = closeModal; },
+      { wide: true });
+  }
+
+  // Envoi de la confirmation : automatique si Supabase est configuré, sinon par la messagerie de l'appareil
+  async function sendConfirmation(o, opts) {
+    const quiet = opts && opts.quiet;
+    if (!isEmail(o.client_email)) { toast('Ajoute l’email du client pour envoyer la confirmation'); return false; }
+    if (isOnline) {
+      try {
+        const res = await store.sendOrderEmail(o.id);
+        if (res && res.envoye_le) o.confirmation_envoyee_le = res.envoye_le;
+        toast(`Confirmation envoyée à ${o.client_email}`);
+        if (!quiet) router();
+        return true;
+      } catch (e) {
+        console.error(e);
+        if (e.code !== 'email_non_configure' && e.code !== 'fonction_absente') {
+          toast('Email non envoyé : ' + e.message);
+          return false;
+        }
+      }
+    }
+    return openMailFallback(o);
+  }
+
+  // Sans envoi automatique : l'email prérempli s'ouvre dans la messagerie de la tablette
+  async function openMailFallback(o) {
+    const mail = await guard(() => buildOrderEmail('confirmation', o), 'Email impossible à préparer');
+    if (!mail) return false;
+    return new Promise((resolve) => {
+      openModal('Envoyer la confirmation',
+        `<p style="margin:0">L’envoi automatique n’est pas encore configuré. Ouvre l’email prérempli dans ta messagerie, vérifie-le, puis envoie-le à <strong>${esc(o.client_email)}</strong>.</p>
+         <p class="small muted" style="margin:0">Ensuite, appuie sur « C’est envoyé » pour le noter sur la commande.</p>`,
+        `<button class="btn" data-x="cancel">Plus tard</button>
+         <button class="btn" data-x="preview">Aperçu</button>
+         <a class="btn btn-primary" data-x="open" href="${esc(mailtoHref(o.client_email, mail))}">Ouvrir dans ma messagerie</a>
+         <button class="btn btn-dark" data-x="done">C’est envoyé</button>`,
+        (box) => {
+          box.querySelector('[data-x="cancel"]').onclick = () => { closeModal(); resolve(false); router(); };
+          box.querySelector('[data-x="preview"]').onclick = () => { closeModal(); resolve(false); previewEmail('confirmation', o); };
+          box.querySelector('[data-x="done"]').onclick = async () => {
+            closeModal();
+            const saved = await guard(() => store.updateOrder(o.id, { confirmation_envoyee_le: new Date().toISOString() }), 'Envoi non noté');
+            if (saved) { Object.assign(o, saved); toast('Confirmation notée comme envoyée'); }
+            resolve(!!saved); router();
+          };
+        });
+    });
+  }
+
+  /* ------------------------------------------------------------------
      Navigation
      ------------------------------------------------------------------ */
   const NAV = [
@@ -586,7 +705,8 @@
      Composants partagés
      ------------------------------------------------------------------ */
   const pill = (statut) => `<span class="pill st-${statut}">${esc(STATUTS[statut] ? STATUTS[statut].label : statut)}</span>`;
-  const payTag = (o) => o.statut === 'annulee' ? '' : (o.paye ? `<span class="tag tag-paid">Payée</span>` : `<span class="tag tag-due">À encaisser</span>`);
+  const payTag = (o) => o.statut === 'annulee' ? '' : (o.paye ? `<span class="tag tag-paid">Payée</span>`
+    : `<span class="tag tag-due">${acompteOf(o) > 0 ? 'Reste ' + eur(resteOf(o)) : 'À encaisser'}</span>`);
   const itemsSummary = (orderId) => itemsOf(orderId).map((i) => `${i.quantite} × ${i.libelle}`).join(', ');
   function bar(value, max) {
     const ratio = max > 0 ? value / max : 0;
@@ -610,7 +730,7 @@
   function openPayment(o, andCollect) {
     openModal(andCollect ? 'Encaisser et marquer retirée' : 'Encaisser la commande',
       `<p style="margin:0" class="muted">${esc(o.client_nom)}, commande ${esc(o.numero)}</p>
-       <div class="pay-box" style="position:static"><span class="muted small">Montant à encaisser</span><span class="amount">${eur(o.total_ttc)}</span></div>
+       <div class="pay-box" style="position:static"><span class="muted small">${acompteOf(o) > 0 ? `Reste à encaisser (total ${eur(o.total_ttc)}, acompte ${eur(acompteOf(o))} déjà versé)` : 'Montant à encaisser'}</span><span class="amount">${eur(resteOf(o))}</span></div>
        <div class="field"><span>Moyen de paiement</span>
          <div class="chips" id="pay-moyens">${MOYENS.map((m, i) => `<button type="button" class="chip" aria-pressed="${i === 0}" data-m="${esc(m)}">${esc(m)}</button>`).join('')}</div>
        </div>`,
@@ -631,7 +751,7 @@
           if (andCollect) await setStatus(o, 'retiree', patch);
           else {
             const saved = await guard(() => store.updateOrder(o.id, patch), 'Paiement non enregistré');
-            if (saved) { Object.assign(o, saved); toast(`Encaissé : ${eur(o.total_ttc)}`); router(); }
+            if (saved) { const r = resteOf(Object.assign({}, o, { paye: false })); Object.assign(o, saved); toast(`Encaissé : ${eur(r)}`); router(); }
           }
         };
       });
@@ -648,7 +768,7 @@
     const capa = capacityFor(d);
     const todo = active.filter((o) => o.statut === 'recue' || o.statut === 'preparation').length;
     const ready = active.filter((o) => o.statut === 'prete').length;
-    const toCollect = active.filter((o) => !o.paye && o.statut !== 'retiree').reduce((s, o) => s + Number(o.total_ttc || 0), 0);
+    const toCollect = active.filter((o) => !o.paye && o.statut !== 'retiree').reduce((s, o) => s + resteOf(o), 0);
     const rel = relDay(d);
     const closure = closureFor(d); const h = hoursFor(d); const m = milestoneFor(d);
     const ordering = milestonesOrdering(today());
@@ -820,10 +940,11 @@
   function exportCsv(list) {
     const dec = (n) => (Number(n) || 0).toFixed(2).replace('.', ',');
     const cell = (v) => { const s = String(v == null ? '' : v); return /[";\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-    const head = ['Numéro', 'Date de retrait', 'Créneau', 'Statut', 'Client', 'Téléphone', 'Email', 'Type', 'Canal', 'Gâteaux', 'Nb gâteaux', 'Total HT', 'TVA', 'Total TTC', 'Payée', 'Moyen de paiement', 'Message sur le gâteau', 'Allergies', 'Notes', 'Créée le'];
+    const head = ['Numéro', 'Date de retrait', 'Créneau', 'Statut', 'Client', 'Téléphone', 'Email', 'Type', 'Canal', 'Gâteaux', 'Nb gâteaux', 'Total HT', 'TVA', 'Total TTC', 'Acompte', 'Moyen de l’acompte', 'Reste à payer', 'Payée', 'Moyen de paiement', 'Confirmation envoyée le', 'Message sur le gâteau', 'Allergies', 'Notes', 'Créée le'];
     const rows = list.map((o) => [o.numero, fmtShort(o.date_retrait), o.creneau, STATUTS[o.statut] ? STATUTS[o.statut].label : o.statut, o.client_nom, o.client_tel, o.client_email,
       o.type === 'pro' ? 'Professionnel' : 'Particulier', CANAUX[o.canal] || o.canal, itemsSummary(o.id), qtyOf(o.id),
-      dec(o.total_ht), dec(o.total_tva), dec(o.total_ttc), o.paye ? 'Oui' : 'Non', o.moyen_paiement, o.message_gateau, o.allergies, o.notes, fmtDateTime(o.created_at)]);
+      dec(o.total_ht), dec(o.total_tva), dec(o.total_ttc), dec(acompteOf(o)), acompteOf(o) > 0 ? o.acompte_moyen : '', dec(o.statut === 'annulee' ? 0 : resteOf(o)),
+      o.paye ? 'Oui' : 'Non', o.moyen_paiement, fmtDateTime(o.confirmation_envoyee_le), o.message_gateau, o.allergies, o.notes, fmtDateTime(o.created_at)]);
     const csv = '﻿' + [head, ...rows].map((r) => r.map(cell).join(';')).join('\r\n');
     download(`commandes-${today()}.csv`, csv, 'text/csv;charset=utf-8');
     toast(`${list.length} commande${list.length > 1 ? 's' : ''} exportée${list.length > 1 ? 's' : ''}`);
@@ -834,7 +955,9 @@
      ------------------------------------------------------------------ */
   function newDraft() {
     return { id: null, customer_id: null, client_nom: '', client_tel: '', client_email: '', societe: '', type: 'particulier', canal: 'telephone',
-      date_retrait: '', creneau: '', message_gateau: '', allergies: '', notes: '', paye: false, moyen_paiement: '', lines: [], dirty: false };
+      date_retrait: '', creneau: '', message_gateau: '', allergies: '', notes: '', paye: false, moyen_paiement: '', lines: [], dirty: false,
+      lieu_retrait: 'boutique', acompte: false, acompte_montant: Number(S.settings.acompte_defaut) || 0, acompte_moyen: MOYENS_ACOMPTE[0], acompte_le: null,
+      envoyer_confirmation: true };
   }
   function draftFromOrder(o, asCopy) {
     const d = newDraft();
@@ -843,8 +966,10 @@
       type: o.type || 'particulier', canal: o.canal || 'telephone',
       date_retrait: asCopy ? '' : o.date_retrait, creneau: asCopy ? '' : (o.creneau || ''),
       message_gateau: asCopy ? '' : (o.message_gateau || ''), allergies: o.allergies || '', notes: asCopy ? '' : (o.notes || ''),
-      paye: asCopy ? false : !!o.paye, moyen_paiement: asCopy ? '' : (o.moyen_paiement || ''), statut: asCopy ? 'recue' : o.statut, paye_le: asCopy ? null : o.paye_le
+      paye: asCopy ? false : !!o.paye, moyen_paiement: asCopy ? '' : (o.moyen_paiement || ''), statut: asCopy ? 'recue' : o.statut, paye_le: asCopy ? null : o.paye_le,
+      lieu_retrait: o.lieu_retrait || 'boutique', envoyer_confirmation: !!asCopy
     });
+    if (!asCopy && acompteOf(o) > 0) Object.assign(d, { acompte: true, acompte_montant: acompteOf(o), acompte_moyen: o.acompte_moyen || MOYENS_ACOMPTE[0], acompte_le: o.acompte_le || null });
     const c = S.customers.find((x) => x.id === o.customer_id); if (c) d.societe = c.societe || '';
     d.lines = itemsOf(o.id).map((i) => {
       const p = i.product_id && productById(i.product_id);
@@ -872,7 +997,7 @@
 
     view.innerHTML = `
       <div class="page-head">
-        <div><h1>${isEdit ? 'Modifier la commande' : 'Nouvelle commande'}</h1>${isEdit ? `<p>${esc(orderById(orderId).numero)}</p>` : '<p>Quatre étapes : client, retrait, gâteaux, détails.</p>'}</div>
+        <div><h1>${isEdit ? 'Modifier la commande' : 'Nouvelle commande'}</h1>${isEdit ? `<p>${esc(orderById(orderId).numero)}</p>` : '<p>Cinq étapes : client, retrait, gâteaux, détails, acompte.</p>'}</div>
         ${isEdit ? `<div class="page-actions"><a class="btn" href="#/commande/${draft.id}">Retour sans enregistrer</a></div>` : ''}
       </div>
       <form class="order-form" id="order-form" novalidate>
@@ -891,7 +1016,7 @@
               <div class="field" id="f-societe" hidden><span>Société</span><input type="text" id="societe" value="${esc(draft.societe)}"></div>
               <div class="grid-2">
                 <label class="field"><span>Téléphone</span><input type="tel" id="client_tel" value="${esc(draft.client_tel)}" inputmode="tel"></label>
-                <label class="field"><span>Email <span class="hint">facultatif</span></span><input type="email" id="client_email" value="${esc(draft.client_email)}"></label>
+                <label class="field" id="f-email"><span>Email <span class="req">*</span> <span class="hint">pour la confirmation</span></span><input type="email" id="client_email" value="${esc(draft.client_email)}" inputmode="email" autocomplete="off"><span class="error-text" id="err-email" hidden>Indique un email valide, par exemple prenom@exemple.fr.</span></label>
               </div>
               <label class="field"><span>Commande reçue par</span>
                 <select id="canal">${Object.entries(CANAUX).map(([k, l]) => `<option value="${k}" ${draft.canal === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
@@ -927,10 +1052,25 @@
               <label class="field"><span>Message à écrire sur le gâteau</span><input type="text" id="message_gateau" value="${esc(draft.message_gateau)}" placeholder="Ex. Joyeux anniversaire Léa"></label>
               <label class="field"><span>Allergies ou régime</span><input type="text" id="allergies" value="${esc(draft.allergies)}" placeholder="Ex. sans fruits à coque"></label>
               <label class="field"><span>Notes internes <span class="hint">visibles seulement par toi</span></span><textarea id="notes">${esc(draft.notes)}</textarea></label>
-              <label class="check"><input type="checkbox" id="paye" ${draft.paye ? 'checked' : ''}>Déjà payée</label>
+            </div>
+          </section>
+
+          <section class="step">
+            <div class="step-head"><span class="step-num">5</span><h2>Acompte</h2></div>
+            <div style="display:grid;gap:14px">
+              <label class="check"><input type="checkbox" id="acompte" ${draft.acompte ? 'checked' : ''}>Un acompte a été versé</label>
+              <div class="grid-2" id="f-acompte" ${draft.acompte ? '' : 'hidden'}>
+                <label class="field" id="f-acompte-montant"><span>Montant de l’acompte</span>
+                  <span class="input-suffix"><input type="number" id="acompte_montant" min="0" step="0.01" inputmode="decimal" value="${esc(draft.acompte_montant)}"><span aria-hidden="true">€</span></span>
+                  <span class="error-text" id="err-acompte" hidden></span></label>
+                <label class="field"><span>Payé par</span>
+                  <select id="acompte_moyen">${MOYENS_ACOMPTE.map((m) => `<option ${draft.acompte_moyen === m ? 'selected' : ''}>${m}</option>`).join('')}</select></label>
+              </div>
+              <label class="check"><input type="checkbox" id="paye" ${draft.paye ? 'checked' : ''}>Déjà payée en totalité</label>
               <label class="field" id="f-moyen" ${draft.paye ? '' : 'hidden'}><span>Moyen de paiement</span>
                 <select id="moyen_paiement">${MOYENS.map((m) => `<option ${draft.moyen_paiement === m ? 'selected' : ''}>${m}</option>`).join('')}</select>
               </label>
+              <label class="check confirm-check"><input type="checkbox" id="envoyer_confirmation" ${draft.envoyer_confirmation ? 'checked' : ''}>${isEdit ? 'Renvoyer la confirmation par email au client' : 'Envoyer la confirmation par email au client'}</label>
             </div>
           </section>
         </div>
@@ -986,6 +1126,16 @@
       if (c) { draft.client_nom = c.nom; $('#client_nom').value = c.nom; showSuggest(); }
     };
     $('#canal').onchange = (e) => { draft.canal = e.target.value; markDirty(); };
+    $('#client_email').addEventListener('input', () => { if (showErrors) validate(); renderRecap(); });
+    $('#acompte').onchange = (e) => {
+      draft.acompte = e.target.checked; $('#f-acompte').hidden = !draft.acompte;
+      if (draft.acompte && !(Number(draft.acompte_montant) > 0)) { draft.acompte_montant = Number(S.settings.acompte_defaut) || 0; $('#acompte_montant').value = draft.acompte_montant; }
+      if (draft.acompte) $('#acompte_montant').focus();
+      markDirty(); if (showErrors) validate(); renderRecap();
+    };
+    $('#acompte_montant').oninput = (e) => { draft.acompte_montant = round2(num(e.target.value, 0)); markDirty(); if (showErrors) validate(); renderRecap(); };
+    $('#acompte_moyen').onchange = (e) => { draft.acompte_moyen = e.target.value; markDirty(); };
+    $('#envoyer_confirmation').onchange = (e) => { draft.envoyer_confirmation = e.target.checked; };
     $('#paye').onchange = (e) => { draft.paye = e.target.checked; $('#f-moyen').hidden = !draft.paye; if (draft.paye && !draft.moyen_paiement) draft.moyen_paiement = MOYENS[0]; markDirty(); renderRecap(); };
     $('#moyen_paiement').onchange = (e) => { draft.moyen_paiement = e.target.value; markDirty(); };
 
@@ -1131,7 +1281,9 @@
           <div><span>Total HT</span><span>${eur(t.total_ht)}</span></div>
           <div><span>TVA</span><span>${eur(t.total_tva)}</span></div>
           <div class="grand"><span>Total TTC</span><span>${eur(t.total_ttc)}</span></div>
-          <div class="muted small"><span>${qty} gâteau${qty > 1 ? 'x' : ''}</span><span>${draft.paye ? 'Déjà payée' : 'À encaisser au retrait'}</span></div>
+          ${draft.acompte && draft.acompte_montant > 0 ? `<div><span>Acompte versé</span><span>− ${eur(draft.acompte_montant)}</span></div>` : ''}
+          <div class="reste"><span>${draft.paye ? 'Déjà payée' : 'Reste à payer au retrait'}</span><span>${eur(draft.paye ? 0 : Math.max(0, round2(t.total_ttc - (draft.acompte ? draft.acompte_montant : 0))))}</span></div>
+          <div class="muted small"><span>${qty} gâteau${qty > 1 ? 'x' : ''}</span><span>${draft.envoyer_confirmation ? 'Confirmation par email' : ''}</span></div>
         </div>
         ${w.length ? `<ul class="warnings">${w.map((x) => `<li>${icon('alert')}<span>${esc(x)}</span></li>`).join('')}</ul>` : ''}
         <button type="button" class="btn btn-dark" data-save>${isEdit ? 'Enregistrer les modifications' : 'Enregistrer la commande'}</button>`;
@@ -1145,7 +1297,17 @@
       const errs = [];
       $('#f-nom').classList.toggle('invalid', !draft.client_nom.trim()); if (!draft.client_nom.trim()) errs.push('#client_nom');
       $('#f-date').classList.toggle('invalid', !draft.date_retrait); if (!draft.date_retrait) errs.push('#date_retrait');
+      const emailOk = isEmail(draft.client_email);
+      $('#f-email').classList.toggle('invalid', !emailOk); $('#err-email').hidden = emailOk; if (!emailOk) errs.push('#client_email');
       $('#err-lines').hidden = draft.lines.length > 0; if (!draft.lines.length) errs.push('#add-custom');
+      let acErr = '';
+      if (draft.acompte) {
+        const total = sumLines(priced()).total_ttc;
+        if (!(draft.acompte_montant > 0)) acErr = 'Indique le montant de l’acompte, ou décoche la case.';
+        else if (draft.lines.length && draft.acompte_montant > total) acErr = `L’acompte dépasse le total de la commande (${eur(total)}).`;
+      }
+      $('#f-acompte-montant').classList.toggle('invalid', !!acErr); $('#err-acompte').hidden = !acErr; $('#err-acompte').textContent = acErr;
+      if (acErr) errs.push('#acompte_montant');
       return errs;
     };
     let saving = false;
@@ -1179,7 +1341,11 @@
           type: draft.type, canal: draft.canal, date_retrait: draft.date_retrait, creneau: draft.creneau || null,
           message_gateau: draft.message_gateau.trim(), allergies: draft.allergies.trim(), notes: draft.notes.trim(),
           paye: draft.paye, moyen_paiement: draft.paye ? (draft.moyen_paiement || MOYENS[0]) : null,
-          paye_le: draft.paye ? (draft.paye_le || new Date().toISOString()) : null
+          paye_le: draft.paye ? (draft.paye_le || new Date().toISOString()) : null,
+          lieu_retrait: 'boutique',
+          acompte_montant: draft.acompte ? round2(draft.acompte_montant) : 0,
+          acompte_moyen: draft.acompte ? draft.acompte_moyen : null,
+          acompte_le: draft.acompte ? (draft.acompte_le || new Date().toISOString()) : null
         }, totals);
         if (draft.id) { order.id = draft.id; order.statut = orderById(draft.id).statut; }
         const res = await store.saveOrder(order, lines);
@@ -1189,6 +1355,10 @@
         draft.dirty = false; leaveGuard = null;
         toast(isEdit ? 'Modifications enregistrées' : `Commande ${res.order.numero} enregistrée`);
         go('#/commande/' + res.order.id);
+        if (draft.envoyer_confirmation) {
+          const savedOrder = orderById(res.order.id);
+          setTimeout(() => sendConfirmation(savedOrder), 80);
+        }
       } catch (e) {
         console.error(e); toast('Commande non enregistrée : ' + (e.message || 'erreur'));
       } finally { saving = false; }
@@ -1209,6 +1379,7 @@
     const cancelled = o.statut === 'annulee';
     const idx = FLOW.indexOf(o.statut);
     const rel = relDay(o.date_retrait);
+    const lieu = lieuById(o.lieu_retrait);
     view.innerHTML = `
       <div class="print-only"><img src="${esc(LOGO_SRC)}" alt=""><strong>${esc(CFG.NOM_BOUTIQUE)}</strong>, bon de commande</div>
       <div class="page-head">
@@ -1230,6 +1401,7 @@
           <section class="block">
             <h2>Retrait</h2>
             <div class="big-line">${rel ? esc(rel) + ', ' : ''}${esc(fmtDay(o.date_retrait))}${o.creneau ? ' à ' + esc(fmtTime(o.creneau)) : ''}</div>
+            <p class="lieu-line"><strong>${esc(lieu.nom)}</strong>${lieuAdresse(lieu) ? `<br><span class="muted">${esc(lieuAdresse(lieu))}</span>` : ''}</p>
             <a class="no-print small" href="#/jour?d=${o.date_retrait}">Voir la journée</a>
           </section>
           <section class="block">
@@ -1259,6 +1431,19 @@
             ${o.notes ? `<div class="note-box" style="background:#F7F5F4"><strong>Note interne :</strong> ${esc(o.notes)}</div>` : ''}
           </section>` : ''}
           <section class="block no-print">
+            <h2>Emails au client</h2>
+            ${!o.client_email ? `<p class="small muted" style="margin:0">Pas d’email pour ce client. <a href="#/commande/${o.id}/modifier">Ajoute-le</a> pour lui envoyer la confirmation.</p>` : `
+            <dl class="facts">
+              <dt>Confirmation</dt><dd>${o.confirmation_envoyee_le ? 'Envoyée le ' + esc(fmtDateTime(o.confirmation_envoyee_le)) : 'Pas encore envoyée'}</dd>
+              <dt>Rappel</dt><dd>${o.rappel_envoye_le ? 'Envoyé le ' + esc(fmtDateTime(o.rappel_envoye_le)) : (S.settings.rappel_actif ? `Prévu ${S.settings.rappel_jours} jours avant le retrait` : 'Rappels automatiques désactivés (Réglages)')}</dd>
+            </dl>
+            ${cancelled ? '' : `<div class="page-actions" style="margin-top:12px">
+              <button class="btn btn-sm ${o.confirmation_envoyee_le ? '' : 'btn-primary'}" id="send-conf">${o.confirmation_envoyee_le ? 'Renvoyer la confirmation' : 'Envoyer la confirmation'}</button>
+              <button class="btn btn-sm btn-ghost" id="preview-conf">Aperçu</button>
+              <button class="btn btn-sm btn-ghost" id="preview-rappel">Aperçu du rappel</button>
+            </div>`}`}
+          </section>
+          <section class="block no-print">
             <h2>Historique</h2>
             <p class="small muted" style="margin:0">Créée le ${esc(fmtDateTime(o.created_at))}${o.updated_at ? `, modifiée le ${esc(fmtDateTime(o.updated_at))}` : ''}.</p>
             ${cancelled ? '' : `<button class="btn btn-danger btn-sm" id="cancel" style="margin-top:14px">Annuler la commande</button>`}
@@ -1269,8 +1454,13 @@
             ? `<span class="tag tag-paid" style="justify-self:start">Payée</span><span class="amount">${eur(o.total_ttc)}</span>
                <span class="small muted">${esc(o.moyen_paiement || '')}${o.paye_le ? ', le ' + esc(fmtDateTime(o.paye_le)) : ''}</span>
                ${cancelled ? '' : '<button class="btn btn-sm btn-ghost no-print" id="unpay">Annuler l’encaissement</button>'}`
-            : `<span class="small muted">Reste à encaisser au retrait</span><span class="amount">${eur(cancelled ? 0 : o.total_ttc)}</span>
+            : `<span class="small muted">Reste à encaisser au retrait</span><span class="amount">${eur(cancelled ? 0 : resteOf(o))}</span>
                ${cancelled ? '' : `<button class="btn btn-primary" id="pay">Encaisser</button>`}`}
+          ${acompteOf(o) > 0 ? `<dl class="pay-facts">
+               <dt>Total TTC</dt><dd>${eur(o.total_ttc)}</dd>
+               <dt>Acompte versé</dt><dd>− ${eur(acompteOf(o))}</dd>
+               <dd class="small muted pay-facts-note">${esc(o.acompte_moyen || '')}${o.acompte_le ? ', le ' + esc(fmtDateTime(o.acompte_le).slice(0, 10)) : ''}</dd>
+             </dl>` : ''}
           ${!cancelled && STATUTS[o.statut].next ? `<button class="btn btn-dark" id="next">${esc(STATUTS[o.statut].action)}</button>` : ''}
         </aside>
       </div>`;
@@ -1288,8 +1478,16 @@
       if (s === 'retiree' && !o.paye) { openPayment(o, true); return; }
       setStatus(o, s);
     });
+    const sendBtn = $('#send-conf'); if (sendBtn) sendBtn.onclick = async () => {
+      sendBtn.disabled = true; sendBtn.textContent = 'Envoi…';
+      const ok = await sendConfirmation(o);
+      if (!ok && document.body.contains(sendBtn)) { sendBtn.disabled = false; sendBtn.textContent = o.confirmation_envoyee_le ? 'Renvoyer la confirmation' : 'Envoyer la confirmation'; }
+    };
+    const pvConf = $('#preview-conf'); if (pvConf) pvConf.onclick = () => previewEmail('confirmation', o);
+    const pvRap = $('#preview-rappel'); if (pvRap) pvRap.onclick = () => previewEmail('rappel', o);
     const cancelBtn = $('#cancel'); if (cancelBtn) cancelBtn.onclick = async () => {
-      if (!(await confirmDialog('Annuler cette commande ?', `La commande de ${esc(o.client_nom)} restera dans l’historique avec le statut « Annulée ». Les gâteaux ne compteront plus dans la capacité du jour.`, 'Annuler la commande', true))) return;
+      const acompteMsg = acompteOf(o) > 0 ? `<br><br><strong>Un acompte de ${eur(acompteOf(o))} a été versé${o.acompte_moyen ? ' (' + esc(o.acompte_moyen.toLowerCase()) + ')' : ''}.</strong> Décide si tu le rembourses ou le conserves, et note-le dans les notes internes.` : '';
+      if (!(await confirmDialog('Annuler cette commande ?', `La commande de ${esc(o.client_nom)} restera dans l’historique avec le statut « Annulée ». Les gâteaux ne compteront plus dans la capacité du jour.${acompteMsg}`, 'Annuler la commande', true))) return;
       setStatus(o, 'annulee');
     };
     const restore = $('#restore'); if (restore) restore.onclick = () => setStatus(o, 'recue');
@@ -1801,6 +1999,42 @@
         <button class="btn" id="add-closure" style="margin-top:12px">${icon('plus')}Ajouter la fermeture</button>
       </section>
 
+      <section class="settings-section">
+        <h2 class="section-title">Boutique</h2>
+        <p>Ces informations apparaissent dans les emails envoyés aux clients : vérifie-les avant d’activer l’envoi.</p>
+        <div class="grid-2">
+          <label class="field"><span>Nom de la boutique</span><input type="text" data-b="nom" value="${esc(s.boutique.nom)}"></label>
+          <label class="field"><span>Adresse de la boutique</span><input type="text" data-b="adresse" value="${esc(s.boutique.adresse)}" placeholder="Numéro, rue, code postal, ville"></label>
+          <label class="field"><span>Téléphone</span><input type="tel" data-b="telephone" value="${esc(s.boutique.telephone)}"></label>
+          <label class="field"><span>Email de la boutique <span class="hint">les clients y répondent</span></span><input type="email" data-b="email" value="${esc(s.boutique.email)}"></label>
+        </div>
+        <label class="field" style="margin-top:14px"><span>Consignes de retrait <span class="hint">facultatif, reprises dans les emails</span></span><input type="text" id="s-infos" value="${esc(s.lieux[0].infos)}" placeholder="Ex. se garer sur le parking de l’église"></label>
+      </section>
+
+      <section class="settings-section">
+        <h2 class="section-title">Acompte et emails</h2>
+        <div class="grid-2">
+          <label class="field"><span>Acompte proposé par défaut</span><span class="input-suffix"><input type="number" min="0" step="1" id="s-acompte" value="${esc(s.acompte_defaut)}"><span aria-hidden="true">€</span></span></label>
+          <label class="field"><span>Moyens de paiement indiqués au client</span><input type="text" id="s-paiement" value="${esc(s.paiement_texte)}"></label>
+          <label class="field"><span>Adresse d’envoi des emails <span class="hint">doit être validée dans Brevo</span></span><input type="email" id="s-from" value="${esc(s.email_expediteur)}" placeholder="contact@…"></label>
+        </div>
+        <h3 class="sub-title">« Bon à savoir », en bas des emails</h3>
+        <p class="small muted" style="margin-top:-4px">Les allergènes de chaque gâteau sont repris automatiquement de sa fiche du catalogue.</p>
+        <div class="grid-2">
+          <label class="field"><span>Conservation</span><textarea id="s-conservation" rows="3" placeholder="Combien de temps, et dans quelles conditions">${esc(s.email_conservation)}</textarea></label>
+          <label class="field"><span>Conditions d’annulation</span><textarea id="s-annulation" rows="3" placeholder="Délai pour annuler, et ce que devient l’acompte">${esc(s.email_annulation)}</textarea></label>
+        </div>
+        <label class="check" style="margin-top:12px"><input type="checkbox" id="s-copie" ${s.email_copie_boutique ? 'checked' : ''}>Recevoir une copie cachée de chaque email sur l’email de la boutique</label>
+        <h3 class="sub-title">Rappel avant le retrait</h3>
+        <div class="grid-3" style="align-items:end">
+          <label class="field"><span>Envoyé</span><select id="s-rjours">${[1, 2, 3].map((n) => `<option value="${n}" ${s.rappel_jours === n ? 'selected' : ''}>${n} jour${n > 1 ? 's' : ''} avant</option>`).join('')}</select></label>
+          <label class="field"><span>À partir de</span><select id="s-rheure">${Array.from({ length: 28 }, (_, i) => minToTime(420 + i * 30)).map((h) => `<option value="${h}" ${s.rappel_heure === h ? 'selected' : ''}>${fmtTime(h)}</option>`).join('')}</select></label>
+          <label class="check"><input type="checkbox" id="s-ractif" ${s.rappel_actif ? 'checked' : ''}>Envoyer les rappels automatiquement</label>
+        </div>
+        <p class="small muted">Le rappel redonne la date, l’adresse de la boutique, le reste à payer et les moyens de paiement. Il ne part qu’une fois par commande, et pas pour une commande passée moins de ${s.rappel_jours} jour${s.rappel_jours > 1 ? 's' : ''} avant le retrait.</p>
+        <div class="page-actions"><button class="btn btn-sm" id="pv-conf">Aperçu de la confirmation</button><button class="btn btn-sm" id="pv-rappel">Aperçu du rappel</button></div>
+      </section>
+
       <div class="settings-section" style="border-top:0;padding-top:0"><button class="btn btn-dark" id="save-settings">Enregistrer les réglages</button></div>
 
       <section class="settings-section">
@@ -1872,6 +2106,25 @@
     $('#s-step').onchange = (e) => { s.creneau_minutes = Number(e.target.value); };
     $('#s-maxslot').oninput = (e) => { s.max_commandes_creneau = Math.max(1, Math.round(num(e.target.value, 1))); };
     $('#s-capa').oninput = (e) => { s.capacite_jour = Math.max(1, Math.round(num(e.target.value, 1))); };
+    $$('[data-b]').forEach((inp) => inp.oninput = () => { s.boutique[inp.dataset.b] = inp.value; });
+    $('#s-infos').oninput = (e) => { s.lieux[0].infos = e.target.value; };
+    $('#s-conservation').oninput = (e) => { s.email_conservation = e.target.value; };
+    $('#s-annulation').oninput = (e) => { s.email_annulation = e.target.value; };
+    $('#s-acompte').oninput = (e) => { s.acompte_defaut = Math.max(0, round2(num(e.target.value, 0))); };
+    $('#s-paiement').oninput = (e) => { s.paiement_texte = e.target.value; };
+    $('#s-from').oninput = (e) => { s.email_expediteur = e.target.value.trim(); };
+    $('#s-copie').onchange = (e) => { s.email_copie_boutique = e.target.checked; };
+    $('#s-rjours').onchange = (e) => { s.rappel_jours = Number(e.target.value); };
+    $('#s-rheure').onchange = (e) => { s.rappel_heure = e.target.value; };
+    $('#s-ractif').onchange = (e) => { s.rappel_actif = e.target.checked; };
+    // Aperçus avec une commande d'exemple et les réglages en cours de saisie
+    const sampleOrder = () => {
+      const o = S.orders.filter((x) => x.statut !== 'annulee' && itemsOf(x.id).length).sort((a, b) => acompteOf(b) - acompteOf(a))[0];
+      return o || { id: 'exemple', numero: 'CMD-EXEMPLE', client_nom: 'Camille', date_retrait: addDays(today(), 2), creneau: '10:30', total_ttc: 34, acompte_montant: 10, paye: false, lieu_retrait: 'boutique' };
+    };
+    const withDraftSettings = (fn) => async () => { const keep = S.settings; S.settings = mergeSettings(s); try { await fn(); } finally { S.settings = keep; } };
+    $('#pv-conf').onclick = withDraftSettings(() => previewEmail('confirmation', sampleOrder()));
+    $('#pv-rappel').onclick = withDraftSettings(() => previewEmail('rappel', sampleOrder()));
     const persist = async (msg) => {
       for (const i of Object.keys(s.horaires)) {
         const h = s.horaires[i];
@@ -1882,6 +2135,10 @@
           if (!(a < b && b < c && c < d)) { toast(`${JOURS[i]} : la coupure doit être entre l’ouverture et la fermeture, et finir après avoir commencé`); return false; }
         }
       }
+      if (s.boutique.email && !isEmail(s.boutique.email)) { toast('L’email de la boutique n’est pas valide'); return false; }
+      if (s.email_expediteur && !isEmail(s.email_expediteur)) { toast('L’adresse d’envoi des emails n’est pas valide'); return false; }
+      if (s.rappel_actif && !S.settings.rappel_actif && !(await confirmDialog('Activer les rappels automatiques ?',
+        `Un email partira chaque jour à partir de ${fmtTime(s.rappel_heure)} pour les commandes à retirer ${s.rappel_jours} jour${s.rappel_jours > 1 ? 's' : ''} plus tard. Vérifie d’abord l’aperçu du rappel et l’adresse des lieux de retrait.`, 'Activer'))) return false;
       const saved = await guard(() => store.saveSettings(s), 'Réglages non enregistrés');
       if (saved === undefined) return false;
       S.settings = mergeSettings(s); toast(msg || 'Réglages enregistrés'); return true;
