@@ -526,3 +526,24 @@ dl.facts dd { margin: 0; font-weight: 600; }
 }
 .print-only { display: none; }
 .print-only img { width: 90px; height: 90px; border-radius: 50%; margin-bottom: 12px; }
+
+/* ---------- Acompte, lieu de retrait, emails (23/11/2026) ---------- */
+.tag-lieu { background: #EFEAF7; color: #5A4380; }
+.input-suffix { position: relative; display: block; }
+.input-suffix input { padding-right: 34px; }
+.input-suffix > span { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); color: var(--taupe); font-weight: 600; pointer-events: none; }
+.totals .reste { font-weight: 800; color: var(--rose-encre); margin-top: 2px; }
+.confirm-check { padding-top: 10px; border-top: 1px dashed var(--ligne); }
+.lieu-line { margin: 6px 0 8px; line-height: 1.45; }
+dl.pay-facts { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; margin: 0; padding-top: 10px; border-top: 1px solid var(--ligne); font-variant-numeric: tabular-nums; }
+dl.pay-facts dt { color: var(--taupe); }
+dl.pay-facts dd { margin: 0; font-weight: 600; text-align: right; }
+dl.pay-facts .pay-facts-note { grid-column: 1 / -1; text-align: left; font-weight: 400; }
+.lieux-edit { display: grid; gap: 12px; margin-top: 16px; }
+.lieu-edit { border: 1px solid var(--ligne); border-radius: 14px; padding: 12px 16px 16px; margin: 0; }
+.lieu-edit legend { padding: 0 6px; font-weight: 700; }
+h3.sub-title { font-size: 16px; font-weight: 700; margin: 22px 0 10px; }
+.email-preview { display: block; width: 100%; height: min(70vh, 720px); border: 1px solid var(--ligne); border-radius: 12px; background: #fff; margin-top: 10px; }
+@media (max-width: 720px) {
+  .lieu-edit .grid-3 { grid-template-columns: 1fr; }
+}
