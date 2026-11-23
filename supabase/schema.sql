@@ -99,6 +99,21 @@ create table if not exists public.orders (
 create index if not exists orders_date_idx on public.orders (date_retrait);
 create index if not exists orders_statut_idx on public.orders (statut);
 
+-- Acompte, lieu de retrait et suivi des emails (ajoutés le 23/11/2026)
+alter table public.orders
+  add column if not exists acompte_montant numeric(10,2) not null default 0,
+  add column if not exists acompte_moyen text,
+  add column if not exists acompte_le timestamptz,
+  add column if not exists lieu_retrait text not null default 'boutique',
+  add column if not exists confirmation_envoyee_le timestamptz,
+  add column if not exists rappel_envoye_le timestamptz;
+
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'orders_acompte_positif') then
+    alter table public.orders add constraint orders_acompte_positif check (acompte_montant >= 0);
+  end if;
+end $$;
+
 create table if not exists public.order_items (
   id                  uuid primary key default gen_random_uuid(),
   order_id            uuid not null references public.orders(id) on delete cascade,
@@ -114,6 +129,23 @@ create table if not exists public.order_items (
   position            integer not null default 0
 );
 create index if not exists order_items_order_idx on public.order_items (order_id);
+
+-- ---------- 4 bis. Journal des emails (envois de confirmation et de rappel)
+create table if not exists public.email_log (
+  id              uuid primary key default gen_random_uuid(),
+  order_id        uuid references public.orders(id) on delete set null,
+  type            text not null check (type in ('confirmation', 'rappel', 'test')),
+  destinataire    text not null,
+  statut          text not null check (statut in ('envoye', 'erreur')),
+  fournisseur_id  text,
+  erreur          text,
+  created_at      timestamptz not null default now()
+);
+create index if not exists email_log_order_idx on public.email_log (order_id);
+alter table public.email_log enable row level security;
+-- (règle d'accès créée plus bas, avec les autres)
+revoke all on public.email_log from anon;
+grant select, insert on public.email_log to authenticated;
 
 -- ---------- 5. Temps forts (jalons) ---------------------------------
 create table if not exists public.milestones (
@@ -169,7 +201,8 @@ begin
     insert into public.orders (
       customer_id, client_nom, client_tel, client_email, type, canal,
       date_retrait, creneau, statut, message_gateau, allergies, notes,
-      total_ht, total_tva, total_ttc, paye, moyen_paiement, paye_le)
+      total_ht, total_tva, total_ttc, paye, moyen_paiement, paye_le,
+      acompte_montant, acompte_moyen, acompte_le, lieu_retrait)
     values (
       nullif(p_order ->> 'customer_id', '')::uuid,
       p_order ->> 'client_nom', p_order ->> 'client_tel', p_order ->> 'client_email',
@@ -182,7 +215,11 @@ begin
       coalesce((p_order ->> 'total_ttc')::numeric, 0),
       coalesce((p_order ->> 'paye')::boolean, false),
       p_order ->> 'moyen_paiement',
-      nullif(p_order ->> 'paye_le', '')::timestamptz)
+      nullif(p_order ->> 'paye_le', '')::timestamptz,
+      greatest(coalesce((p_order ->> 'acompte_montant')::numeric, 0), 0),
+      p_order ->> 'acompte_moyen',
+      nullif(p_order ->> 'acompte_le', '')::timestamptz,
+      coalesce(nullif(p_order ->> 'lieu_retrait', ''), 'boutique'))
     returning * into v_row;
   else
     update public.orders set
@@ -203,7 +240,16 @@ begin
       total_ttc      = coalesce((p_order ->> 'total_ttc')::numeric, 0),
       paye           = coalesce((p_order ->> 'paye')::boolean, paye),
       moyen_paiement = p_order ->> 'moyen_paiement',
-      paye_le        = nullif(p_order ->> 'paye_le', '')::timestamptz
+      paye_le        = nullif(p_order ->> 'paye_le', '')::timestamptz,
+      -- Champs ajoutés le 23/11/2026 : modifiés seulement s'ils sont envoyés
+      acompte_montant = case when p_order ? 'acompte_montant'
+                             then greatest(coalesce((p_order ->> 'acompte_montant')::numeric, 0), 0)
+                             else acompte_montant end,
+      acompte_moyen   = case when p_order ? 'acompte_moyen' then p_order ->> 'acompte_moyen' else acompte_moyen end,
+      acompte_le      = case when p_order ? 'acompte_le' then nullif(p_order ->> 'acompte_le', '')::timestamptz else acompte_le end,
+      lieu_retrait    = case when p_order ? 'lieu_retrait'
+                             then coalesce(nullif(p_order ->> 'lieu_retrait', ''), 'boutique')
+                             else lieu_retrait end
     where id = v_id
     returning * into v_row;
 
@@ -239,7 +285,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['products','customers','orders','order_items','milestones','settings'] loop
+  foreach t in array array['products','customers','orders','order_items','milestones','settings','email_log'] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('drop policy if exists admin_all on public.%I', t);
     execute format(
