@@ -28,7 +28,8 @@ config.js             mode démo / Supabase (URL du projet + clé publishable)
 manifest.webmanifest  installation sur l'écran d'accueil
 assets/               logo
 vendor/               bibliothèques tierces, versions figées (voir vendor/LICENSES.md)
-supabase/schema.sql   base de données + sécurité (droits, RLS)
+supabase/schema.sql   base de données + sécurité (droits, RLS), pour une base neuve
+supabase/migrations/  modifications appliquées à la base existante, datées
 build_demo.py         fabrique une démo en un seul fichier (mode démo)
 version.json          numéro de la version publiée (détection des mises à jour)
 ```
@@ -80,6 +81,16 @@ Connexion : email + mot de passe (lien par email en secours, limité à 2 emails
 4. Sur la tablette, l'appli détecte la nouvelle version (au plus tard 10 minutes après, ou au réveil de la tablette) et affiche **« Nouvelle version disponible : Mettre à jour »**. Si une commande est en cours de saisie, elle demande confirmation avant de recharger.
 
 La version en cours est affichée dans *Réglages > Données*.
+
+## Modifications de la base (migrations)
+
+Toute modification de la base de production passe par un fichier daté dans `supabase/migrations/`, appliqué une seule fois, et `schema.sql` est mis à jour pour rester identique.
+
+| Date | Fichier | Objet |
+|---|---|---|
+| 23/11/2026 | `20261123_durcissement_securite.sql` | Suite au contrôle de sécurité Supabase : `is_admin()` déplacée dans un schéma `private` non exposé à l'API, aucun droit pour les visiteurs non connectés, `search_path` fixé sur les fonctions. Aucune donnée modifiée. |
+
+Après chaque migration : relancer le contrôle de sécurité (*Supabase > Advisors > Security Advisor*).
 
 ## Points de vigilance
 

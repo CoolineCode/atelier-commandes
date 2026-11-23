@@ -16,18 +16,25 @@ alter table public.app_admins enable row level security;
 -- Ajoute ici l'adresse email de connexion (à modifier) :
 -- insert into public.app_admins (email) values ('ophelie@exemple.fr') on conflict do nothing;
 
-create or replace function public.is_admin()
+-- Fonction de contrôle placée dans un schéma « private », non exposé par l'API
+create schema if not exists private;
+revoke all on schema private from public, anon;
+grant usage on schema private to authenticated;
+
+create or replace function private.is_admin()
 returns boolean
 language sql
 stable
 security definer
-set search_path = public
+set search_path = ''
 as $$
   select exists (
     select 1 from public.app_admins
     where lower(email) = lower(coalesce(auth.jwt() ->> 'email', ''))
   );
 $$;
+revoke all on function private.is_admin() from public, anon;
+grant execute on function private.is_admin() to authenticated;
 
 -- ---------- 2. Catalogue --------------------------------------------
 create table if not exists public.products (
@@ -130,7 +137,7 @@ insert into public.settings (id, data) values (1, '{}'::jsonb) on conflict (id) 
 
 -- ---------- 7. Mise à jour automatique de updated_at -----------------
 create or replace function public.touch_updated_at()
-returns trigger language plpgsql as $$
+returns trigger language plpgsql set search_path = '' as $$
 begin
   new.updated_at := now();
   return new;
@@ -146,7 +153,7 @@ create or replace function public.save_order(p_order jsonb, p_items jsonb)
 returns public.orders
 language plpgsql
 security invoker
-set search_path = public
+set search_path = ''
 as $$
 declare
   v_id    uuid := nullif(p_order ->> 'id', '')::uuid;
@@ -154,7 +161,7 @@ declare
   v_item  jsonb;
   v_pos   integer := 0;
 begin
-  if not public.is_admin() then
+  if not private.is_admin() then
     raise exception 'Accès refusé';
   end if;
 
@@ -236,7 +243,7 @@ begin
     execute format('alter table public.%I enable row level security', t);
     execute format('drop policy if exists admin_all on public.%I', t);
     execute format(
-      'create policy admin_all on public.%I for all to authenticated using (public.is_admin()) with check (public.is_admin())', t);
+      'create policy admin_all on public.%I for all to authenticated using (private.is_admin()) with check (private.is_admin())', t);
   end loop;
 end $$;
 
@@ -245,7 +252,6 @@ end $$;
 grant usage on schema public to authenticated;
 grant select, insert, update, delete on public.products, public.customers, public.orders,
       public.order_items, public.milestones, public.settings to authenticated;
-grant execute on function public.is_admin() to authenticated;
 
 -- Les visiteurs non connectés (rôle anon) n'ont accès à rien.
 revoke all on public.products, public.customers, public.orders, public.order_items,
@@ -253,3 +259,6 @@ revoke all on public.products, public.customers, public.orders, public.order_ite
 revoke execute on function public.save_order(jsonb, jsonb) from anon, public;
 grant execute on function public.save_order(jsonb, jsonb) to authenticated;
 grant usage, select on sequence public.order_number_seq to authenticated;
+
+-- Nettoyage pour une base créée avant le 23/11/2026 : ancienne fonction publique
+drop function if exists public.is_admin();
